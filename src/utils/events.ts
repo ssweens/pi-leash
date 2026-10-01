@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const LEASH_BLOCKED_EVENT = "leash:blocked";
 export const LEASH_DANGEROUS_EVENT = "leash:dangerous";

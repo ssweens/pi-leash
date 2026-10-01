@@ -2,8 +2,8 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   ModelSelectorComponent,
-} from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { type ResolvedConfig, updateAutoModeConfig } from "../config";
 import { getModelRuntime } from "../lib/model-resolver";
 import {

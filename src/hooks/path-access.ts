@@ -14,7 +14,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   Container,
   Key,
@@ -22,7 +22,7 @@ import {
   Spacer,
   Text,
   visibleWidth,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import type { ResolvedConfig } from "../config";
 import { getConfigPath } from "../config";
 import { extractBashPathCandidates } from "../utils/bash-paths";

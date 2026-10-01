@@ -4,8 +4,8 @@
  * Resolves a model by provider + ID from the model registry.
  */
 
-import type { Model } from "@mariozechner/pi-ai";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal shape of Pi's ModelRuntime that Leash needs to detect and pass on. */
 export interface ModelRuntimeLike {

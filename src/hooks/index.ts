@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ResolvedConfig } from "../config";
 import { setupAutoMode } from "./auto-mode";
 import { setupPathAccessHook } from "./path-access";

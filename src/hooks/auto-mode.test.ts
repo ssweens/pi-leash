@@ -1,4 +1,4 @@
-import { initTheme } from "@mariozechner/pi-coding-agent";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type * as ConfigModule from "../config";
 import type { ResolvedConfig } from "../config";
@@ -341,10 +341,20 @@ describe("Leash auto-mode controls", () => {
         entries.push(data);
       },
     };
+    const activeModel = { provider: "test", id: "active", name: "Active" };
     const ctx = {
       hasUI: true,
       model: { provider: "test", id: "active" },
       modelRegistry: {
+        // Pi 0.99 keeps its ModelRuntime on the registry facade; Pi's
+        // ModelSelectorComponent reads models and refreshes through it.
+        runtime: {
+          getAvailableSnapshot: () => [activeModel],
+          getModel: (provider: string, id: string) =>
+            provider === "test" && id === "active" ? activeModel : undefined,
+          getError: () => undefined,
+          refresh: async () => ({ aborted: false, errors: new Map() }),
+        },
         refresh() {},
         getError: () => undefined,
         getAvailable: () => [

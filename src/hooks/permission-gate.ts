@@ -5,7 +5,7 @@ import {
   type ExtensionContext,
   getMarkdownTheme,
   isToolCallEventType,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   Box,
   Container,
@@ -17,7 +17,7 @@ import {
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import type {
   CacheTtlOption,
   DangerousPattern,
