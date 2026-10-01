@@ -86,13 +86,20 @@ describe("buildAutoModeSystemPrompt", () => {
 });
 
 describe("classifyAutoModeAction", () => {
-  it("reports a sanitized provider failure instead of hiding it", async () => {
+  it.each([
+    "result",
+    "throw",
+  ] as const)("reports a sanitized provider failure from %s", async (failure) => {
     executeSubagentMock.mockReset();
-    executeSubagentMock.mockResolvedValueOnce({
-      content: "",
-      error: "429 rate limited; Authorization: Bearer not-a-real-token",
-      aborted: false,
-    });
+    const error = "429 rate limited; Authorization: Bearer not-a-real-token";
+    if (failure === "throw")
+      executeSubagentMock.mockRejectedValueOnce(new Error(error));
+    else
+      executeSubagentMock.mockResolvedValueOnce({
+        content: "",
+        error,
+        aborted: false,
+      });
     const ctx = {
       model: { provider: "test", id: "classifier" },
       sessionManager: { getBranch: () => [] },
@@ -116,6 +123,67 @@ describe("classifyAutoModeAction", () => {
         "Auto-mode classifier failed: 429 rate limited; [redacted credential]",
       source: "fallback",
     });
+  });
+
+  it("does not label an early SDK abort as a timeout", async () => {
+    executeSubagentMock.mockReset();
+    executeSubagentMock.mockResolvedValueOnce({ content: "", aborted: true });
+    expect(
+      await classifyAutoModeAction(
+        {
+          toolName: "bash",
+          input: {},
+          command: "rm -rf /tmp/leash-test",
+          description: "recursive force delete",
+          pattern: "rm -rf",
+        },
+        CONFIG,
+        {
+          model: { provider: "test", id: "classifier" },
+          sessionManager: { getBranch: () => [] },
+        } as unknown as ExtensionContext,
+      ),
+    ).toEqual({
+      decision: "ask",
+      source: "fallback",
+      reason: "Auto-mode classifier failed: Request aborted.",
+    });
+  });
+
+  it("fails closed when an executor returns an allow after the deadline", async () => {
+    vi.useFakeTimers();
+    executeSubagentMock.mockReset();
+    try {
+      executeSubagentMock.mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+        return {
+          content: '{"decision":"allow","reason":"Too late."}',
+          aborted: false,
+        };
+      });
+      const pending = classifyAutoModeAction(
+        {
+          toolName: "bash",
+          input: {},
+          command: "rm -rf /tmp/leash-test",
+          description: "recursive force delete",
+          pattern: "rm -rf",
+        },
+        { ...CONFIG, timeout: 1000 },
+        {
+          model: { provider: "test", id: "classifier" },
+          sessionManager: { getBranch: () => [] },
+        } as unknown as ExtensionContext,
+      );
+      await vi.advanceTimersByTimeAsync(1100);
+      expect(await pending).toEqual({
+        decision: "ask",
+        source: "fallback",
+        reason: "Auto-mode classifier timed out after 1000ms.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("labels deadline expiry with the configured timeout", () => {

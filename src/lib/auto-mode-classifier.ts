@@ -374,12 +374,12 @@ export async function classifyAutoModeAction(
       controller.signal,
     );
 
-    if (result.error || result.aborted) {
+    if (result.error || result.aborted || controller.signal.aborted) {
       return {
         decision: "ask",
         reason: describeAutoModeFailure(
-          result.error,
-          result.aborted,
+          result.error ?? (result.aborted ? "Request aborted." : undefined),
+          controller.signal.aborted,
           timeoutMs,
         ),
         source: "fallback",
@@ -393,6 +393,16 @@ export async function classifyAutoModeAction(
         source: "fallback",
       }
     );
+  } catch (error) {
+    return {
+      decision: "ask",
+      reason: describeAutoModeFailure(
+        error,
+        controller.signal.aborted,
+        timeoutMs,
+      ),
+      source: "fallback",
+    };
   } finally {
     clearTimeout(timeout);
   }

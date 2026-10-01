@@ -13,10 +13,13 @@ All notable changes to this project will be documented in this file.
 - Bounded session-and-resume history of the last 20 interactive dangerous-command approvals and denials, supplied to the classifier only as non-authoritative evidence for equivalent actions.
 
 ### Changed
+- The first auto-mode classifier failure now switches to manual approval and saves that mode for resumed and new sessions. `/leash auto` retries in the current session; `/leash settings` saves auto mode for new sessions. Normal classifier `ask` verdicts do not disable auto mode.
+- Pending auto-mode checks show the classifier model, elapsed time, and timeout in the footer, with a warning after five seconds or half the timeout.
 - `sudo` is now an explicit-intent auto-mode soft gate rather than a hard deny. An auto approval skips only generic dangerous-command confirmation; Leash's dedicated sudo password flow still runs.
 - Auto-mode fallback now reports the specific timeout, model setup, or credential-redacted provider failure instead of the generic “could not complete safely”.
 
 ### Fixed
+- Subagent error messages now propagate their provider failure details even when Pi's SDK resolves the prompt without throwing. Thrown classifier failures also return to manual approval instead of blocking the tool hook with an exception.
 - `/leash settings` no longer fails with `this.modelRuntime.getAvailableSnapshot is not a function` on Pi 0.8x. Pi's model selector dropped its `settingsManager` constructor argument and now takes `ModelRuntime` in that position; the classifier picker detects which layout the host uses instead of assuming the older one.
 - Subagent sessions (auto-mode classifier, command explainer) now pass Pi 0.8x's `modelRuntime` when available instead of the removed `modelRegistry` option, so they reuse the host session's providers and credentials rather than a freshly constructed runtime.
 - `SubagentConfig.tools` is typed as built-in tool *names* (`string[]`), matching Pi's SDK allowlist; tool instances belong in `customTools`.

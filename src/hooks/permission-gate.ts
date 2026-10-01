@@ -1087,7 +1087,9 @@ export function setupPermissionGateHook(
         });
         return { block: true, reason };
       }
-      ctx.ui.notify(`Leash auto: ${verdict.reason}`, "warning");
+      if (verdict.source !== "fallback") {
+        ctx.ui.notify(`Leash auto: ${verdict.reason}`, "warning");
+      }
     }
 
     // Manual-mode grants intentionally do not bypass the auto classifier.

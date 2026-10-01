@@ -5,7 +5,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { type ResolvedConfig, updateAutoModeConfig } from "../config";
-import { getModelRuntime } from "../lib/model-resolver";
 import {
   AUTO_MODE_USER_DECISION_ENTRY_TYPE,
   type AutoModeAction,
@@ -14,11 +13,14 @@ import {
   classifyAutoModeAction,
   getAutoModeModelLabel,
 } from "../lib/auto-mode-classifier";
+import { getModelRuntime } from "../lib/model-resolver";
 
 const SESSION_ENTRY_TYPE = "leash-auto-mode";
 const VERDICT_ENTRY_TYPE = "leash-auto-verdict";
 const VERDICT_STATUS_KEY = "leash-auto-verdict";
 const VERDICT_STATUS_TIMEOUT_MS = 8_000;
+const CLASSIFIER_STATUS_KEY = "leash-auto-pending";
+const CLASSIFIER_SLOW_WARNING_MS = 5_000;
 const AUTO_BUSY_FRAME_INTERVAL_MS = 180;
 const AUTO_BUSY_COLORS = ["accent", "warning", "success"] as const;
 
@@ -281,6 +283,10 @@ export function setupAutoMode(
   let classifierRequests = 0;
   let classifierFrame = 0;
   let classifierTimer: ReturnType<typeof setInterval> | undefined;
+  let classifierStartedAt = 0;
+  let classifierModelLabel = "";
+  let classifierTimeoutMs = 10_000;
+  let classifierWarned = false;
 
   const clearVerdictStatus = (ctx: ExtensionContext) => {
     if (verdictTimer) clearTimeout(verdictTimer);
@@ -338,10 +344,12 @@ export function setupAutoMode(
   const renderAutoStatus = (ctx: ExtensionContext) => {
     if (!enabled) {
       ctx.ui.setStatus("leash-auto", undefined);
+      ctx.ui.setStatus(CLASSIFIER_STATUS_KEY, undefined);
       return;
     }
 
     if (classifierRequests === 0) {
+      ctx.ui.setStatus(CLASSIFIER_STATUS_KEY, undefined);
       ctx.ui.setStatus(
         "leash-auto",
         ctx.ui.theme.fg("accent", "⏵⏵ leash auto"),
@@ -349,6 +357,14 @@ export function setupAutoMode(
       return;
     }
 
+    const elapsedMs = Date.now() - classifierStartedAt;
+    ctx.ui.setStatus(
+      CLASSIFIER_STATUS_KEY,
+      ctx.ui.theme.fg(
+        classifierWarned ? "warning" : "dim",
+        `leash waiting for ${classifierModelLabel} · ${Math.floor(elapsedMs / 1000)}s/${classifierTimeoutMs / 1000}s`,
+      ),
+    );
     const first = AUTO_BUSY_COLORS[classifierFrame % AUTO_BUSY_COLORS.length];
     const second =
       AUTO_BUSY_COLORS[(classifierFrame + 1) % AUTO_BUSY_COLORS.length];
@@ -369,12 +385,33 @@ export function setupAutoMode(
     if (classifierRequests === 0 || classifierTimer) return;
     classifierTimer = setInterval(() => {
       classifierFrame = (classifierFrame + 1) % AUTO_BUSY_COLORS.length;
+      if (
+        !classifierWarned &&
+        Date.now() - classifierStartedAt >=
+          Math.min(CLASSIFIER_SLOW_WARNING_MS, classifierTimeoutMs / 2)
+      ) {
+        classifierWarned = true;
+        ctx.ui.notify(
+          `Leash auto is still waiting for ${classifierModelLabel}. Tool execution is paused; the check times out after ${classifierTimeoutMs / 1000}s and switches to manual approval.`,
+          "warning",
+        );
+      }
       renderAutoStatus(ctx);
     }, AUTO_BUSY_FRAME_INTERVAL_MS);
     classifierTimer.unref?.();
   };
 
   const startClassifierAnimation = (ctx: ExtensionContext) => {
+    if (classifierRequests === 0) {
+      classifierStartedAt = Date.now();
+      classifierModelLabel = getAutoModeModelLabel(
+        config.permissionGate.autoMode,
+        ctx,
+      );
+      classifierTimeoutMs = config.permissionGate.autoMode.timeout;
+      classifierWarned = false;
+      clearVerdictStatus(ctx);
+    }
     classifierRequests += 1;
     classifierFrame = 0;
     renderAutoStatus(ctx);
@@ -391,6 +428,7 @@ export function setupAutoMode(
     if (!enabled) {
       clearClassifierAnimation();
       ctx.ui.setStatus("leash-auto", undefined);
+      ctx.ui.setStatus(CLASSIFIER_STATUS_KEY, undefined);
       clearVerdictStatus(ctx);
       return;
     }
@@ -398,7 +436,11 @@ export function setupAutoMode(
     ensureClassifierAnimation(ctx);
   };
 
-  const setEnabled = (next: boolean, ctx: ExtensionContext): boolean => {
+  const setEnabled = (
+    next: boolean,
+    ctx: ExtensionContext,
+    notify = true,
+  ): boolean => {
     if (next && !config.permissionGate.autoMode.model && !ctx.model) {
       ctx.ui.notify(
         "Leash auto mode needs an active Pi model or a configured classifier model.",
@@ -409,12 +451,14 @@ export function setupAutoMode(
     enabled = next;
     pi.appendEntry(SESSION_ENTRY_TYPE, { enabled });
     updateStatus(ctx);
-    ctx.ui.notify(
-      enabled
-        ? "Leash auto mode enabled. Dangerous Bash actions are classifier-gated."
-        : "Leash auto mode disabled. Dangerous Bash actions prompt normally.",
-      "info",
-    );
+    if (notify) {
+      ctx.ui.notify(
+        enabled
+          ? "Leash auto mode enabled. Dangerous Bash actions are classifier-gated."
+          : "Leash auto mode disabled. Dangerous Bash actions prompt normally.",
+        "info",
+      );
+    }
     return true;
   };
 
@@ -497,19 +541,49 @@ export function setupAutoMode(
     classifierRequests = 0;
     clearClassifierAnimation();
     ctx.ui.setStatus("leash-auto", undefined);
+    ctx.ui.setStatus(CLASSIFIER_STATUS_KEY, undefined);
     clearVerdictStatus(ctx);
   });
 
   return {
     isEnabled: () => enabled,
     classify: async (action, ctx) => {
+      const manualVerdict: AutoModeVerdict = {
+        decision: "ask",
+        reason: "Leash auto mode is disabled; manual approval is required.",
+        source: "fallback",
+      };
+      if (!enabled) return manualVerdict;
+      const modelLabel = getAutoModeModelLabel(
+        config.permissionGate.autoMode,
+        ctx,
+      );
       startClassifierAnimation(ctx);
       try {
-        return await classifyAutoModeAction(
+        const verdict = await classifyAutoModeAction(
           action,
           config.permissionGate.autoMode,
           ctx,
         );
+        // A sibling request may have failed while this one was pending.
+        if (!enabled && verdict.decision === "allow") return manualVerdict;
+        if (verdict.source === "fallback" && enabled) {
+          setEnabled(false, ctx, false);
+          config.permissionGate.autoMode.enabled = false;
+          try {
+            updateAutoModeConfig({ enabled: false });
+          } catch {
+            ctx.ui.notify(
+              "Leash could not save manual mode. This session remains manual, but new sessions may still start in auto mode.",
+              "warning",
+            );
+          }
+          ctx.ui.notify(
+            `Leash auto (${modelLabel}): ${verdict.reason} Switched to manual approval. /leash auto re-enables it for this session; /leash settings saves it for new sessions.`,
+            "warning",
+          );
+        }
+        return verdict;
       } finally {
         stopClassifierAnimation(ctx);
       }

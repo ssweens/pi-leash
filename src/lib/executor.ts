@@ -89,9 +89,7 @@ export async function executeSubagent(
   // constructed runtime.
   const runtime = getModelRuntime(ctx);
   const modelWiring = (
-    runtime
-      ? { modelRuntime: runtime }
-      : { modelRegistry: ctx.modelRegistry }
+    runtime ? { modelRuntime: runtime } : { modelRegistry: ctx.modelRegistry }
   ) as Parameters<typeof createAgentSession>[0];
 
   const { session } = await createAgentSession({
@@ -107,6 +105,7 @@ export async function executeSubagent(
   let accumulated = "";
   let finalResponse = "";
   let aborted = false;
+  let error: string | undefined;
   const toolCalls = new Map<string, SubagentToolCall>();
 
   let toolsHaveStarted = false;
@@ -200,6 +199,12 @@ export async function executeSubagent(
       const msg = event.message;
       if (msg.role === "assistant") {
         const assistantMsg = msg as AssistantMessage;
+        if (assistantMsg.stopReason === "error") {
+          error =
+            assistantMsg.errorMessage ||
+            "Provider returned an error without details";
+        }
+        if (assistantMsg.stopReason === "aborted") aborted = true;
         const msgUsage = assistantMsg.usage;
         if (msgUsage) {
           usage.inputTokens = (usage.inputTokens ?? 0) + msgUsage.input;
@@ -237,8 +242,6 @@ export async function executeSubagent(
       { once: true },
     );
   }
-
-  let error: string | undefined;
 
   try {
     await session.prompt(userMessage);
