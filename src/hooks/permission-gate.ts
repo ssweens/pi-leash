@@ -397,7 +397,7 @@ async function executeSudoCommand(
  *
  * When `cacheEnabled` is true and `cacheTtlOptions` has entries, a radio
  * selector is rendered below the password input. The user navigates with
- * Up/Down arrows and presses Enter to confirm the selected duration.
+ * Arrow keys and presses Enter to confirm the selected duration.
  * A duration of 0 means "don't cache".
  */
 async function promptForSudoPassword(
@@ -487,7 +487,7 @@ async function promptForSudoPassword(
         theme.fg(
           "dim",
           cacheEnabled && options.length > 1
-            ? "enter: confirm • ↑↓: cache duration • esc: cancel"
+            ? "enter: confirm • ↑↓←→: cache duration • esc: cancel"
             : "enter: confirm • esc: cancel",
         ),
         1,
@@ -517,6 +517,8 @@ async function promptForSudoPassword(
         const backspace = matchesKey(data, Key.backspace) || data === "\u007f";
         const up = matchesKey(data, Key.up) || data === "\u001b[A";
         const down = matchesKey(data, Key.down) || data === "\u001b[B";
+        const left = matchesKey(data, Key.left) || data === "\u001b[D";
+        const right = matchesKey(data, Key.right) || data === "\u001b[C";
 
         if (confirm) {
           if (password.length === 0) return;
@@ -524,10 +526,10 @@ async function promptForSudoPassword(
           done({ password, rememberTtlMs: selected.ttlMs });
         } else if (cancel) {
           done(null);
-        } else if (up && cacheEnabled && options.length > 1) {
+        } else if ((up || left) && cacheEnabled && options.length > 1) {
           selectorIndex = (selectorIndex - 1 + options.length) % options.length;
           renderSelector();
-        } else if (down && cacheEnabled && options.length > 1) {
+        } else if ((down || right) && cacheEnabled && options.length > 1) {
           selectorIndex = (selectorIndex + 1) % options.length;
           renderSelector();
         } else if (backspace) {
