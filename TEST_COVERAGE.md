@@ -10,6 +10,11 @@
 - the real inline dialog component renders the concrete reason label (for example, `w: allow recursive force delete for 5 min`);
 - timed grants expire after five minutes, and explicitly clearing trust revokes session grants;
 - dangerous command parsing, cwd scope detection, and inline-dialog height helpers continue to work.
+- an enabled prompt timeout auto-denies or auto-allows a dangerous command once, auto-denies a sudo password prompt, and does not treat a plain select dismissal as an auto-allow.
+
+`src/hooks/path-access.test.ts` verifies outside-workspace prompts auto-deny or auto-allow once, and that an auto-allow asks again for the same path.
+
+`src/prompt-timeout.test.ts` verifies config normalization, agent-facing timeout messages, and that the dialog timer fires once unless disposed.
 
 ## Auto-mode failures and feedback
 

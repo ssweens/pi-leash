@@ -25,6 +25,12 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ResolvedConfig } from "../config";
 import { getConfigPath } from "../config";
+import {
+  armPromptTimeout,
+  autoPromptMessage,
+  promptTimeoutStatus,
+  type ResolvedPromptTimeout,
+} from "../prompt-timeout";
 import { extractBashPathCandidates } from "../utils/bash-paths";
 import { emitBlocked } from "../utils/events";
 import {
@@ -42,7 +48,9 @@ type PromptResult =
   | "allow-dir-session"
   | "allow-file-always"
   | "allow-dir-always"
-  | "deny";
+  | "deny"
+  | "timeout-allow"
+  | "timeout-deny";
 
 // Pending grant to be persisted after all targets pass
 interface PendingGrant {
@@ -113,6 +121,7 @@ function createPromptComponent(
   displayDir: string,
   cwd: string,
   showFileOptions: boolean,
+  promptTimeout: ResolvedPromptTimeout,
 ) {
   return (
     tui: { terminal: { columns: number }; requestRender(): void },
@@ -175,6 +184,11 @@ function createPromptComponent(
         0,
       ),
     );
+    const timeoutText = new Text("", 1, 0);
+    let remainingSeconds = 0;
+    if (promptTimeout.enabled) {
+      container.addChild(timeoutText);
+    }
 
     const renderOptions = () => {
       for (let i = 0; i < options.length; i++) {
@@ -198,6 +212,34 @@ function createPromptComponent(
       tui.requestRender();
     };
 
+    let settled = false;
+    let countdown = { dispose() {} };
+    const finish = (value: PromptResult) => {
+      if (settled) return;
+      settled = true;
+      countdown.dispose();
+      done(value);
+    };
+    if (promptTimeout.enabled) {
+      countdown = armPromptTimeout(
+        promptTimeout.timeoutMs,
+        tui,
+        (seconds) => {
+          remainingSeconds = seconds;
+          timeoutText.setText(
+            theme.fg(
+              "dim",
+              promptTimeoutStatus(promptTimeout, remainingSeconds),
+            ),
+          );
+        },
+        () =>
+          finish(
+            promptTimeout.action === "allow" ? "timeout-allow" : "timeout-deny",
+          ),
+      );
+    }
+
     return {
       render: (width: number) => {
         const innerWidth = Math.max(1, width - 2);
@@ -215,6 +257,7 @@ function createPromptComponent(
         return [top, ...lines, bottom];
       },
       invalidate: () => container.invalidate(),
+      dispose: () => countdown.dispose(),
       handleInput: (data: string) => {
         if (
           matchesKey(data, Key.up) ||
@@ -233,11 +276,11 @@ function createPromptComponent(
           return;
         }
         if (matchesKey(data, Key.enter)) {
-          done(options[selectedIndex].result);
+          finish(options[selectedIndex].result);
           return;
         }
         if (matchesKey(data, Key.escape)) {
-          done("deny");
+          finish("deny");
         }
       },
     };
@@ -357,8 +400,32 @@ export function setupPathAccessHook(
           displayDir,
           ctx.cwd,
           showFileOptions,
+          config.promptTimeout,
         ),
       );
+
+      if (result === "timeout-allow" || result === "timeout-deny") {
+        const message = autoPromptMessage({
+          action: result === "timeout-allow" ? "allow" : "deny",
+          timeoutMs: config.promptTimeout.timeoutMs,
+          what: "outside-workspace access",
+          detail: displayPath,
+        });
+        pi.sendMessage({
+          customType: "leash",
+          content: message,
+          display: true,
+        });
+        ctx.ui.notify(message, "warning");
+        if (result === "timeout-allow") continue;
+        emitBlocked(pi, {
+          feature: "pathAccess",
+          toolName,
+          input: event.input,
+          reason: message,
+        });
+        return { block: true, reason: message };
+      }
 
       // Handle "once" grants: just continue, do NOT add to pending
       if (result === "allow-file-once" || result === "allow-dir-once") {

@@ -16,6 +16,11 @@
  *       "enabled": true,
  *       "timeout": 30000
  *     }
+ *   },
+ *   "promptTimeout": {
+ *     "enabled": false,
+ *     "timeoutMs": 30000,
+ *     "action": "deny"
  *   }
  * }
  */
@@ -23,6 +28,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+  type PromptTimeoutConfig,
+  type ResolvedPromptTimeout,
+  resolvePromptTimeout,
+} from "./prompt-timeout";
 
 export function getConfigPath(): string {
   return join(getAgentDir(), "settings", "pi-leash.json");
@@ -134,6 +144,11 @@ export interface GuardrailsConfig {
     /** Paths outside cwd that are always allowed. Trailing / = directory grant. */
     allowedPaths?: string[];
   };
+  /**
+   * Dismiss unanswered permission and path-access prompts.
+   * Disabled by default. See ResolvedConfig.promptTimeout.
+   */
+  promptTimeout?: PromptTimeoutConfig;
   /** Permission gate configuration */
   permissionGate?: {
     /** Additional dangerous patterns to watch for */
@@ -220,6 +235,12 @@ export interface ResolvedConfig {
       maxRetries: number;
     };
   };
+  /**
+   * Unanswered Leash prompts. When enabled, dangerous-command and
+   * outside-workspace dialogs dismiss after timeoutMs and apply action.
+   * "allow" is once only. Sudo password prompts always deny on timeout.
+   */
+  promptTimeout: ResolvedPromptTimeout;
 }
 
 const DEFAULT_SECRET_FILES_RULE: PolicyRule = {
@@ -335,6 +356,7 @@ function mergeConfig(userConfig: GuardrailsConfig): ResolvedConfig {
     policies,
     pathAccess,
     permissionGate,
+    promptTimeout: resolvePromptTimeout(userConfig.promptTimeout),
   };
 }
 
@@ -400,6 +422,37 @@ export function updateAutoModeConfig(patch: Partial<AutoModeConfig>): void {
     ...patch,
   };
   raw.permissionGate = { ...permissionGate, autoMode };
+
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, JSON.stringify(raw, null, 2), { mode: 0o600 });
+  clearConfigCache();
+}
+
+/**
+ * Persist only the supplied prompt-timeout fields without discarding unrelated
+ * Leash settings or future config keys.
+ */
+export function updatePromptTimeoutConfig(
+  patch: Partial<PromptTimeoutConfig>,
+): void {
+  const configPath = getConfigPath();
+  let raw: Record<string, unknown> = {};
+
+  if (existsSync(configPath)) {
+    try {
+      raw = JSON.parse(readFileSync(configPath, "utf-8")) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      // Same as auto mode: a settings save replaces an unreadable file.
+    }
+  }
+
+  raw.promptTimeout = {
+    ...((raw.promptTimeout ?? {}) as Record<string, unknown>),
+    ...patch,
+  };
 
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, JSON.stringify(raw, null, 2), { mode: 0o600 });

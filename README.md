@@ -22,6 +22,7 @@ pi install git:github.com/ssweens/pi-leash
 - **permission-gate**: detects dangerous bash commands and asks for confirmation.
 - **auto mode** (opt-in): sends dangerous Bash actions through a dedicated, fail-closed classifier before deciding to allow, prompt, or deny.
 - **path-access** (opt-in): restricts tool access to the current working directory with allow/ask/block modes.
+- **prompt timeout** (opt-in): dismisses an unanswered permission or path-access prompt and auto-allows it once or auto-denies it, then tells the agent which happened.
 - **optional command explainer**: can call a small LLM to explain a dangerous command inline in the confirmation dialog.
 - **sudo mode** (opt-in): securely handles sudo commands by prompting for passwords and executing with `sudo -S`.
 
@@ -53,6 +54,11 @@ Create this file to customize settings. All fields are optional — sensible def
       "timeout": 30000,
       "preserveEnv": false
     }
+  },
+  "promptTimeout": {
+    "enabled": false,
+    "timeoutMs": 30000,
+    "action": "deny"
   }
 }
 ```
@@ -127,6 +133,11 @@ Create this file to customize settings. All fields are optional — sensible def
         { "label": "Session", "ttlMs": 9007199254740991 }
       ]
     }
+  },
+  "promptTimeout": {
+    "enabled": false,
+    "timeoutMs": 30000,
+    "action": "deny"
   }
 }
 ```
@@ -305,6 +316,35 @@ Entries in `allowedPaths` use trailing `/` for directory grants and exact paths 
 - Symlinks are not resolved (lexical path comparison only).
 - Bash path extraction is best-effort (AST-based heuristics).
 - In non-interactive mode, `ask` mode degrades to `block`.
+
+## Prompt timeout (opt-in)
+
+Unanswered Leash prompts otherwise wait until someone answers. `promptTimeout` dismisses them.
+
+```json
+{
+  "promptTimeout": {
+    "enabled": true,
+    "timeoutMs": 30000,
+    "action": "deny"
+  }
+}
+```
+
+- `enabled` (default `false`) — off until set.
+- `timeoutMs` (default `30000`) — how long the prompt stays open. Values under `1000` are raised to `1000`.
+- `action` — `deny` (default) or `allow`.
+
+`/leash settings` edits the same three fields. Enter toggles the timeout, cycles the action between auto-deny and auto-allow once, and cycles the deadline through 15s, 30s, 1m, 5m, 15m, 30m, 60m, and 120m. The change applies to the current session immediately and is written to `pi-leash.json`.
+
+The dialog counts down. When it hits zero:
+
+- **Dangerous commands** and **outside-workspace access** take `action`. `allow` is once: it does not create a session grant, a reason trust window, or a persisted path grant. The same prompt appears again next time.
+- The agent is told in the tool block reason (on deny) and in a Leash message (either way) that the decision was automatic, not a manual approval or denial.
+- **Sudo password prompts** always deny on timeout. A password cannot be auto-accepted, even when `action` is `allow`. The dangerous-command dialog can still time out into the password prompt; the password prompt then has its own deadline.
+- `/leash settings` and the classifier model picker are not timed. Those are opened by the person, not by the agent.
+
+On hosts that cannot show Leash's terminal dialog, the plain `select` / `input` fallback also receives the deadline. That fallback reports cancel and timeout the same way, so Leash will not auto-allow there: a closed prompt with no explicit allow is denied, and the agent is told why.
 
 ## Events
 

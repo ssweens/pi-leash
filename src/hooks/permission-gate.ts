@@ -25,6 +25,15 @@ import type {
 } from "../config";
 import { executeSubagent, resolveModel } from "../lib";
 import type { AutoModeAction } from "../lib/auto-mode-classifier";
+import {
+  armPromptTimeout,
+  autoPromptMessage,
+  fallbackDismissMessage,
+  promptTimeoutSeconds,
+  promptTimeoutStatus,
+  type ResolvedPromptTimeout,
+  sudoTimeoutMessage,
+} from "../prompt-timeout";
 import { extractBashPathCandidates } from "../utils/bash-paths";
 import { emitBlocked, emitDangerous } from "../utils/events";
 import {
@@ -139,6 +148,12 @@ interface SudoPasswordPromptResult {
   password: string;
   /** TTL in ms for password caching. 0 = don't cache. */
   rememberTtlMs: number;
+}
+
+interface SudoPasswordTimeout {
+  timedOut: true;
+  /** True when this dialog's timer fired. False when a plain input closed with no password. */
+  explicit: boolean;
 }
 
 /**
@@ -405,9 +420,10 @@ async function promptForSudoPassword(
   command: string,
   cacheEnabled: boolean,
   cacheTtlOptions: CacheTtlOption[],
+  promptTimeout: ResolvedPromptTimeout,
   errorMessage?: string,
   attemptsRemaining?: number,
-): Promise<SudoPasswordPromptResult | null> {
+): Promise<SudoPasswordPromptResult | SudoPasswordTimeout | null> {
   // Build the effective options list: index 0 = don't cache, then each configured option.
   const options: CacheTtlOption[] = [
     { label: "Don't remember", ttlMs: 0 },
@@ -415,133 +431,188 @@ async function promptForSudoPassword(
   ];
 
   const result = await ctx.ui.custom<
-    SudoPasswordPromptResult | null | undefined
-  >((tui: { terminal?: { rows?: number } }, theme, kb, done) => {
-    const container = new Container();
-    const yellowBorder = (s: string) => theme.fg("warning", s);
+    SudoPasswordPromptResult | SudoPasswordTimeout | null | undefined
+  >(
+    (
+      tui: { terminal?: { rows?: number }; requestRender?: () => void },
+      theme,
+      kb,
+      done,
+    ) => {
+      const container = new Container();
+      const yellowBorder = (s: string) => theme.fg("warning", s);
 
-    let password = "";
-    let selectorIndex = 0; // starts on "Don't remember"
-    container.addChild(new DynamicBorder(yellowBorder));
-    container.addChild(
-      new Text(theme.fg("warning", theme.bold("Sudo Password Required")), 1, 0),
-    );
+      let password = "";
+      let selectorIndex = 0; // starts on "Don't remember"
+      container.addChild(new DynamicBorder(yellowBorder));
+      container.addChild(
+        new Text(
+          theme.fg("warning", theme.bold("Sudo Password Required")),
+          1,
+          0,
+        ),
+      );
 
-    // Show error from previous failed attempt
-    if (errorMessage) {
+      // Show error from previous failed attempt
+      if (errorMessage) {
+        container.addChild(new Spacer(1));
+        container.addChild(
+          new Text(theme.fg("error", `✗ ${errorMessage}`), 1, 0),
+        );
+      }
+
+      // Show remaining attempts
+      if (attemptsRemaining !== undefined) {
+        container.addChild(new Spacer(1));
+        container.addChild(
+          new Text(
+            theme.fg(
+              "dim",
+              `${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} remaining`,
+            ),
+            1,
+            0,
+          ),
+        );
+      }
+
       container.addChild(new Spacer(1));
       container.addChild(
-        new Text(theme.fg("error", `✗ ${errorMessage}`), 1, 0),
+        new Text(theme.fg("text", "Enter sudo password to execute:"), 1, 0),
       );
-    }
+      container.addChild(new Spacer(1));
+      container.addChild(
+        new DynamicBorder((s: string) => theme.fg("muted", s)),
+      );
+      container.addChild(new Text(theme.fg("text", command), 1, 0));
+      container.addChild(
+        new DynamicBorder((s: string) => theme.fg("muted", s)),
+      );
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(theme.fg("text", "Password:"), 1, 0));
 
-    // Show remaining attempts
-    if (attemptsRemaining !== undefined) {
+      const passwordText = new Text("", 1, 0);
+      container.addChild(passwordText);
+
+      // Cache-duration selector
+      const selectorText = new Text("", 1, 0);
+      const renderSelector = () => {
+        const parts = options.map((opt, i) => {
+          const sel = i === selectorIndex;
+          return sel
+            ? theme.fg("accent", `> ${opt.label} <`)
+            : `  ${opt.label}  `;
+        });
+        selectorText.setText(theme.fg("dim", "Remember: ") + parts.join(" "));
+      };
+      if (cacheEnabled && options.length > 1) {
+        container.addChild(new Spacer(1));
+        renderSelector();
+        container.addChild(selectorText);
+      }
+
       container.addChild(new Spacer(1));
       container.addChild(
         new Text(
           theme.fg(
             "dim",
-            `${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} remaining`,
+            cacheEnabled && options.length > 1
+              ? "enter: confirm • ↑↓←→: cache duration • esc: cancel"
+              : "enter: confirm • esc: cancel",
           ),
           1,
           0,
         ),
       );
-    }
+      const timeoutText = new Text("", 1, 0);
+      let remainingSeconds = promptTimeoutSeconds(promptTimeout.timeoutMs);
+      if (promptTimeout.enabled) {
+        container.addChild(timeoutText);
+      }
+      container.addChild(new DynamicBorder(yellowBorder));
 
-    container.addChild(new Spacer(1));
-    container.addChild(
-      new Text(theme.fg("text", "Enter sudo password to execute:"), 1, 0),
-    );
-    container.addChild(new Spacer(1));
-    container.addChild(new DynamicBorder((s: string) => theme.fg("muted", s)));
-    container.addChild(new Text(theme.fg("text", command), 1, 0));
-    container.addChild(new DynamicBorder((s: string) => theme.fg("muted", s)));
-    container.addChild(new Spacer(1));
-    container.addChild(new Text(theme.fg("text", "Password:"), 1, 0));
-
-    const passwordText = new Text("", 1, 0);
-    container.addChild(passwordText);
-
-    // Cache-duration selector
-    const selectorText = new Text("", 1, 0);
-    const renderSelector = () => {
-      const parts = options.map((opt, i) => {
-        const sel = i === selectorIndex;
-        return sel
-          ? theme.fg("accent", `> ${opt.label} <`)
-          : `  ${opt.label}  `;
-      });
-      selectorText.setText(theme.fg("dim", "Remember: ") + parts.join(" "));
-    };
-    if (cacheEnabled && options.length > 1) {
-      container.addChild(new Spacer(1));
-      renderSelector();
-      container.addChild(selectorText);
-    }
-
-    container.addChild(new Spacer(1));
-    container.addChild(
-      new Text(
-        theme.fg(
-          "dim",
-          cacheEnabled && options.length > 1
-            ? "enter: confirm • ↑↓←→: cache duration • esc: cancel"
-            : "enter: confirm • esc: cancel",
-        ),
-        1,
-        0,
-      ),
-    );
-    container.addChild(new DynamicBorder(yellowBorder));
-
-    return {
-      render: (width: number) => {
-        const lines = container.render(width);
-        return clampDialogLines(
-          lines,
-          getDialogMaxRows(tui),
-          7,
-          width,
-          theme.fg("dim", "… command preview truncated to fit terminal …"),
+      let settled = false;
+      let countdown = { dispose() {} };
+      const finish = (
+        value: SudoPasswordPromptResult | SudoPasswordTimeout | null,
+      ) => {
+        if (settled) return;
+        settled = true;
+        countdown.dispose();
+        done(value);
+      };
+      const renderTimeout = () => {
+        timeoutText.setText(
+          theme.fg(
+            "dim",
+            promptTimeoutStatus(promptTimeout, remainingSeconds, {
+              password: true,
+            }),
+          ),
         );
-      },
-      invalidate: () => container.invalidate(),
-      handleInput: (data: string) => {
-        const confirm =
-          kb.matches(data, "selectConfirm" as any) || isEnterInput(data);
-        const cancel =
-          kb.matches(data, "selectCancel" as any) ||
-          matchesKey(data, Key.escape);
-        const backspace = matchesKey(data, Key.backspace) || data === "\u007f";
-        const up = matchesKey(data, Key.up) || data === "\u001b[A";
-        const down = matchesKey(data, Key.down) || data === "\u001b[B";
-        const left = matchesKey(data, Key.left) || data === "\u001b[D";
-        const right = matchesKey(data, Key.right) || data === "\u001b[C";
+      };
+      if (promptTimeout.enabled) {
+        countdown = armPromptTimeout(
+          promptTimeout.timeoutMs,
+          tui,
+          (seconds) => {
+            remainingSeconds = seconds;
+            renderTimeout();
+          },
+          () => finish({ timedOut: true, explicit: true }),
+        );
+      }
 
-        if (confirm) {
-          if (password.length === 0) return;
-          const selected = options[selectorIndex];
-          done({ password, rememberTtlMs: selected.ttlMs });
-        } else if (cancel) {
-          done(null);
-        } else if ((up || left) && cacheEnabled && options.length > 1) {
-          selectorIndex = (selectorIndex - 1 + options.length) % options.length;
-          renderSelector();
-        } else if ((down || right) && cacheEnabled && options.length > 1) {
-          selectorIndex = (selectorIndex + 1) % options.length;
-          renderSelector();
-        } else if (backspace) {
-          password = password.slice(0, -1);
-          passwordText.setText(theme.fg("text", "•".repeat(password.length)));
-        } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-          password += data;
-          passwordText.setText(theme.fg("text", "•".repeat(password.length)));
-        }
-      },
-    };
-  });
+      return {
+        render: (width: number) => {
+          const lines = container.render(width);
+          return clampDialogLines(
+            lines,
+            getDialogMaxRows(tui),
+            promptTimeout.enabled ? 8 : 7,
+            width,
+            theme.fg("dim", "… command preview truncated to fit terminal …"),
+          );
+        },
+        invalidate: () => container.invalidate(),
+        dispose: () => countdown.dispose(),
+        handleInput: (data: string) => {
+          const confirm =
+            kb.matches(data, "selectConfirm" as any) || isEnterInput(data);
+          const cancel =
+            kb.matches(data, "selectCancel" as any) ||
+            matchesKey(data, Key.escape);
+          const backspace =
+            matchesKey(data, Key.backspace) || data === "\u007f";
+          const up = matchesKey(data, Key.up) || data === "\u001b[A";
+          const down = matchesKey(data, Key.down) || data === "\u001b[B";
+          const left = matchesKey(data, Key.left) || data === "\u001b[D";
+          const right = matchesKey(data, Key.right) || data === "\u001b[C";
+
+          if (confirm) {
+            if (password.length === 0) return;
+            const selected = options[selectorIndex];
+            finish({ password, rememberTtlMs: selected.ttlMs });
+          } else if (cancel) {
+            finish(null);
+          } else if ((up || left) && cacheEnabled && options.length > 1) {
+            selectorIndex =
+              (selectorIndex - 1 + options.length) % options.length;
+            renderSelector();
+          } else if ((down || right) && cacheEnabled && options.length > 1) {
+            selectorIndex = (selectorIndex + 1) % options.length;
+            renderSelector();
+          } else if (backspace) {
+            password = password.slice(0, -1);
+            passwordText.setText(theme.fg("text", "•".repeat(password.length)));
+          } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+            password += data;
+            passwordText.setText(theme.fg("text", "•".repeat(password.length)));
+          }
+        },
+      };
+    },
+  );
 
   if (result !== undefined) return result;
 
@@ -558,8 +629,11 @@ async function promptForSudoPassword(
   const password = await ctx.ui.input(
     titleParts.join("\n"),
     "Enter sudo password",
+    promptTimeout.enabled ? { timeout: promptTimeout.timeoutMs } : undefined,
   );
-  if (!password) return null;
+  if (!password) {
+    return promptTimeout.enabled ? { timedOut: true, explicit: false } : null;
+  }
 
   let rememberTtlMs = 0;
   if (cacheEnabled && options.length > 1) {
@@ -1151,7 +1225,12 @@ export function setupPermissionGateHook(
         | "allow-cwd-fileops-session"
         | "allow-trust-window"
         | "allow-trust-session"
-        | "deny";
+        | "deny"
+        | "timeout-allow"
+        | "timeout-deny"
+        | "fallback-dismiss";
+
+      const promptTimeout = config.promptTimeout;
 
       let result = await ctx.ui.custom<ConfirmResult | undefined>(
         (
@@ -1255,7 +1334,45 @@ export function setupPermissionGateHook(
               0,
             ),
           );
+          const timeoutText = new Text("", 1, 0);
+          let remainingSeconds = promptTimeoutSeconds(promptTimeout.timeoutMs);
+          if (promptTimeout.enabled) {
+            container.addChild(timeoutText);
+          }
           container.addChild(new DynamicBorder(redBorder));
+
+          let settled = false;
+          let countdown = { dispose() {} };
+          const finish = (value: ConfirmResult) => {
+            if (settled) return;
+            settled = true;
+            countdown.dispose();
+            done(value);
+          };
+          const renderTimeout = () => {
+            timeoutText.setText(
+              theme.fg(
+                "dim",
+                promptTimeoutStatus(promptTimeout, remainingSeconds),
+              ),
+            );
+          };
+          if (promptTimeout.enabled) {
+            countdown = armPromptTimeout(
+              promptTimeout.timeoutMs,
+              tui,
+              (seconds) => {
+                remainingSeconds = seconds;
+                renderTimeout();
+              },
+              () =>
+                finish(
+                  promptTimeout.action === "allow"
+                    ? "timeout-allow"
+                    : "timeout-deny",
+                ),
+            );
+          }
 
           return {
             render: (width: number) => {
@@ -1270,7 +1387,7 @@ export function setupPermissionGateHook(
                 return clampDialogLines(
                   lines,
                   getDialogMaxRows(tui),
-                  5,
+                  promptTimeout.enabled ? 6 : 5,
                   width,
                   theme.fg(
                     "dim",
@@ -1306,6 +1423,17 @@ export function setupPermissionGateHook(
                   return `${line}${" ".repeat(pad)}`;
                 }),
                 truncateToWidth(theme.fg("muted", "─".repeat(width)), width),
+                ...(promptTimeout.enabled
+                  ? [
+                      truncateToWidth(
+                        theme.fg(
+                          "dim",
+                          promptTimeoutStatus(promptTimeout, remainingSeconds),
+                        ),
+                        width,
+                      ),
+                    ]
+                  : []),
                 truncateToWidth(
                   theme.fg(
                     "dim",
@@ -1318,6 +1446,7 @@ export function setupPermissionGateHook(
               return lines.map((line) => truncateToWidth(line, width));
             },
             invalidate: () => container.invalidate(),
+            dispose: () => countdown.dispose(),
             handleInput: (data: string) => {
               if (viewingFullCommand) {
                 const wrappedCommand = wrapTextWithAnsi(
@@ -1377,20 +1506,20 @@ export function setupPermissionGateHook(
                 commandScrollOffset = 0;
                 tui.requestRender();
               } else if (confirm || data === "y" || data === "Y") {
-                done("allow");
+                finish("allow");
               } else if (!autoActive && (data === "a" || data === "A")) {
-                done("allow-session");
+                finish("allow-session");
               } else if (
                 canGrantCwdFileOpsSession &&
                 (data === "c" || data === "C")
               ) {
-                done("allow-cwd-fileops-session");
+                finish("allow-cwd-fileops-session");
               } else if (!autoActive && (data === "w" || data === "W")) {
-                done("allow-trust-window");
+                finish("allow-trust-window");
               } else if (!autoActive && (data === "s" || data === "S")) {
-                done("allow-trust-session");
+                finish("allow-trust-session");
               } else if (cancel || data === "n" || data === "N") {
-                done("deny");
+                finish("deny");
               }
             },
           };
@@ -1431,13 +1560,34 @@ export function setupPermissionGateHook(
               : []),
             { label: "Deny", value: "deny" },
           ];
+        const timeoutNote = !promptTimeout.enabled
+          ? ""
+          : promptTimeout.action === "allow"
+            ? `No explicit allow within ${promptTimeoutSeconds(promptTimeout.timeoutMs)}s denies. This dialog cannot auto-allow.`
+            : `No choice within ${promptTimeoutSeconds(promptTimeout.timeoutMs)}s: auto-deny.`;
         const selected = await ctx.ui.select(
-          `Dangerous Command Detected\nReason: ${description}\nSource: ${sourceLabel}\nTrigger: ${rawPattern}\nCommand: ${command}`,
+          [
+            "Dangerous Command Detected",
+            `Reason: ${description}`,
+            `Source: ${sourceLabel}`,
+            `Trigger: ${rawPattern}`,
+            `Command: ${command}`,
+            timeoutNote,
+          ]
+            .filter(Boolean)
+            .join("\n"),
           approvalOptions.map((option) => option.label),
+          promptTimeout.enabled
+            ? { timeout: promptTimeout.timeoutMs }
+            : undefined,
         );
-        result =
-          approvalOptions.find((option) => option.label === selected)?.value ??
-          "deny";
+        if (selected === undefined && promptTimeout.enabled) {
+          result = "fallback-dismiss";
+        } else {
+          result =
+            approvalOptions.find((option) => option.label === selected)
+              ?.value ?? "deny";
+        }
       }
 
       if (result === "allow-session") {
@@ -1477,16 +1627,69 @@ export function setupPermissionGateHook(
         });
       }
 
-      autoMode?.recordUserDecision?.(
-        {
-          command,
-          description,
-          pattern: rawPattern,
-          decision: result === "deny" ? "deny" : "allow",
-          ...(classifierReason ? { classifierReason } : {}),
-        },
-        ctx,
-      );
+      const reportTimeout = (message: string) => {
+        pi.sendMessage({
+          customType: "leash",
+          content: message,
+          display: true,
+        });
+        ctx.ui.notify(message, "warning");
+      };
+
+      if (result === "timeout-allow") {
+        reportTimeout(
+          autoPromptMessage({
+            action: "allow",
+            timeoutMs: promptTimeout.timeoutMs,
+            what: "dangerous command",
+            detail: description,
+          }),
+        );
+      }
+
+      if (result === "timeout-deny" || result === "fallback-dismiss") {
+        const reason =
+          result === "timeout-deny"
+            ? autoPromptMessage({
+                action: "deny",
+                timeoutMs: promptTimeout.timeoutMs,
+                what: "dangerous command",
+                detail: description,
+              })
+            : fallbackDismissMessage({
+                action: promptTimeout.action,
+                timeoutMs: promptTimeout.timeoutMs,
+                what: "dangerous command",
+              });
+        reportTimeout(reason);
+        emitBlocked(pi, {
+          feature: "permissionGate",
+          toolName: "bash",
+          input: event.input,
+          reason,
+        });
+        return { block: true, reason };
+      }
+
+      if (
+        result === "allow" ||
+        result === "allow-session" ||
+        result === "allow-cwd-fileops-session" ||
+        result === "allow-trust-window" ||
+        result === "allow-trust-session" ||
+        result === "deny"
+      ) {
+        autoMode?.recordUserDecision?.(
+          {
+            command,
+            description,
+            pattern: rawPattern,
+            decision: result === "deny" ? "deny" : "allow",
+            ...(classifierReason ? { classifierReason } : {}),
+          },
+          ctx,
+        );
+      }
 
       if (result === "deny") {
         emitBlocked(pi, {
@@ -1501,15 +1704,15 @@ export function setupPermissionGateHook(
       }
 
       // Sudo always retains Leash's password-entry flow. An auto `allow`
-      // skips only the generic dangerous-command approval above.
+      // or a one-time timeout allow skips only the generic approval above.
       if (sudoMode.enabled && sudoCommand) {
         const maxAttempts = sudoMode.maxRetries;
         let attemptsUsed = 0;
         let errorMessage: string | undefined;
 
-        // Try cache first — the approval dialog above already ran, so the
-        // user has explicitly consented to this specific sudo invocation.
-        // The cache only skips the *password* re-entry step.
+        // Try cache first — the approval step above already finished
+        // (manual allow or one-time timeout allow). The cache only skips
+        // the password re-entry step.
         let password: string | null = sudoMode.cacheEnabled
           ? getCachedPassword()
           : null;
@@ -1524,22 +1727,31 @@ export function setupPermissionGateHook(
               command,
               sudoMode.cacheEnabled,
               sudoMode.cacheTtlOptions,
+              promptTimeout,
               errorMessage,
               // Only show remaining attempts after the first failure
               errorMessage ? attemptsRemaining : undefined,
             );
 
-            if (promptResult === null) {
+            if (promptResult === null || "timedOut" in promptResult) {
+              const reason =
+                promptResult === null
+                  ? "User cancelled sudo password prompt"
+                  : sudoTimeoutMessage(
+                      promptTimeout.timeoutMs,
+                      promptResult.explicit,
+                    );
+              if (promptResult !== null) reportTimeout(reason);
               emitBlocked(pi, {
                 feature: "permissionGate",
                 toolName: "bash",
                 input: event.input,
-                reason: "User cancelled sudo password prompt",
-                userDenied: true,
+                reason,
+                ...(promptResult === null ? { userDenied: true } : {}),
               });
               return {
                 block: true,
-                reason: "User cancelled sudo password prompt",
+                reason,
               };
             }
 

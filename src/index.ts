@@ -26,6 +26,11 @@ import { setupLeashHooks } from "./hooks";
  *       "timeout": 30000,
  *       "preserveEnv": false
  *     }
+ *   },
+ *   "promptTimeout": {
+ *     "enabled": false,
+ *     "timeoutMs": 30000,
+ *     "action": "deny"
  *   }
  * }
  */

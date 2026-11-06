@@ -82,13 +82,22 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
         maxRetries: 3,
       },
     },
+    promptTimeout: {
+      enabled: false,
+      timeoutMs: 30_000,
+      action: "deny",
+    },
   };
 
   function createHarness(
-    selections: string[],
+    selections: Array<string | undefined>,
     autoMode?: AutoModeController,
     autoDenyPattern?: string,
     sudoModeEnabled = false,
+    options?: {
+      waitForCustom?: boolean;
+      promptTimeout?: ResolvedConfig["promptTimeout"];
+    },
   ) {
     const hookConfig = structuredClone(config);
     if (autoDenyPattern) {
@@ -97,12 +106,17 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
       ];
     }
     hookConfig.permissionGate.sudoMode.enabled = sudoModeEnabled;
+    if (options?.promptTimeout) {
+      hookConfig.promptTimeout = options.promptTimeout;
+    }
     const handlers = new Map<
       string,
       (event: unknown, ctx: unknown) => Promise<unknown>
     >();
     const selectOptions: string[][] = [];
+    const selectTimeouts: Array<number | undefined> = [];
     const renderedDialogs: string[][] = [];
+    const messages: string[] = [];
     const fakePi = {
       on(
         event: string,
@@ -111,7 +125,9 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
         handlers.set(event, handler);
       },
       events: { emit() {} },
-      sendMessage() {},
+      sendMessage(message: { content?: unknown }) {
+        if (typeof message.content === "string") messages.push(message.content);
+      },
     };
     const fakeContext = {
       hasUI: true,
@@ -130,9 +146,13 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
             },
             kb: { matches(_data: string, _binding: string): boolean },
             done: (result: unknown) => void,
-          ) => { render(width: number): string[] },
+          ) => { render(width: number): string[]; dispose?(): void },
         ) => {
           let completed: unknown;
+          let resolveDone: (value: unknown) => void = () => {};
+          const donePromise = new Promise((resolve) => {
+            resolveDone = resolve;
+          });
           const component = factory(
             {
               terminal: { rows: 40, columns: 120 },
@@ -146,13 +166,21 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
             { matches: () => false },
             (result) => {
               completed = result;
+              resolveDone(result);
             },
           );
           renderedDialogs.push(component.render(120));
+          if (options?.waitForCustom) return donePromise;
+          component.dispose?.();
           return completed;
         },
-        select: async (_title: string, options: string[]) => {
+        select: async (
+          _title: string,
+          options: string[],
+          opts?: { timeout?: number },
+        ) => {
           selectOptions.push(options);
+          selectTimeouts.push(opts?.timeout);
           return selections.shift();
         },
         input: async () => undefined,
@@ -167,7 +195,9 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
 
     return {
       selectOptions,
+      selectTimeouts,
       renderedDialogs,
+      messages,
       dispatch(command: string) {
         return toolCall(
           { toolName: "bash", toolCallId: command, input: { command } },
@@ -374,6 +404,86 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
       "Allow recursive force delete for this session",
     );
     expect(decisions).toEqual(["allow", "deny", "ask"]);
+  });
+
+  it("auto-denies a dangerous command when its prompt times out", async () => {
+    const harness = createHarness([], undefined, undefined, false, {
+      waitForCustom: true,
+      promptTimeout: { enabled: true, timeoutMs: 40, action: "deny" },
+    });
+
+    await expect(harness.dispatch("rm -rf ./scratch")).resolves.toEqual({
+      block: true,
+      reason:
+        "Leash auto-denied this dangerous command after 1s with no response (recursive force delete). This was a timeout decision, not a manual denial.",
+    });
+    expect(harness.messages).toEqual([
+      "Leash auto-denied this dangerous command after 1s with no response (recursive force delete). This was a timeout decision, not a manual denial.",
+    ]);
+    expect(harness.selectOptions).toHaveLength(0);
+    expect(harness.renderedDialogs[0]?.join("\n")).toContain(
+      "timeout in 1s → auto-deny",
+    );
+  });
+
+  it("auto-allows a dangerous command once when its prompt times out", async () => {
+    const harness = createHarness([], undefined, undefined, false, {
+      waitForCustom: true,
+      promptTimeout: { enabled: true, timeoutMs: 40, action: "allow" },
+    });
+
+    await expect(harness.dispatch("rm -rf ./one")).resolves.toBeUndefined();
+    await expect(harness.dispatch("rm -rf ./two")).resolves.toBeUndefined();
+    expect(harness.renderedDialogs).toHaveLength(2);
+    expect(harness.messages[0]).toContain("auto-allowed");
+    expect(harness.messages[0]).toContain("not a manual approval");
+    expect(harness.messages[1]).toContain("auto-allowed");
+    expect(harness.selectOptions).toHaveLength(0);
+  });
+
+  it("auto-denies a sudo password prompt instead of inventing a password", async () => {
+    const harness = createHarness([], undefined, undefined, true, {
+      waitForCustom: true,
+      promptTimeout: { enabled: true, timeoutMs: 40, action: "allow" },
+    });
+
+    await expect(harness.dispatch("sudo true")).resolves.toEqual({
+      block: true,
+      reason:
+        "Leash auto-denied the sudo password prompt after 1s with no response. A password cannot be auto-accepted.",
+    });
+    expect(harness.messages.join("\n")).toContain(
+      "auto-allowed this dangerous command",
+    );
+    expect(harness.renderedDialogs.at(-1)?.join("\n")).toContain(
+      "a password cannot be auto-accepted",
+    );
+  });
+
+  it("does not auto-allow a plain select dialog that closes without a choice", async () => {
+    const harness = createHarness([undefined], undefined, undefined, false, {
+      promptTimeout: { enabled: true, timeoutMs: 5000, action: "allow" },
+    });
+
+    await expect(harness.dispatch("rm -rf ./scratch")).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining("not auto-allowed"),
+    });
+    expect(harness.selectTimeouts).toEqual([5000]);
+    expect(harness.messages[0]).toContain("cannot tell a timeout from cancel");
+  });
+
+  it("auto-denies a plain select dialog that closes without a choice", async () => {
+    const harness = createHarness([undefined], undefined, undefined, false, {
+      promptTimeout: { enabled: true, timeoutMs: 5000, action: "deny" },
+    });
+
+    await expect(harness.dispatch("rm -rf ./scratch")).resolves.toEqual({
+      block: true,
+      reason:
+        "Leash auto-denied this dangerous command because the prompt closed with no choice within 5s.",
+    });
+    expect(harness.selectTimeouts).toEqual([5000]);
   });
 });
 

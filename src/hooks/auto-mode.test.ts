@@ -6,16 +6,20 @@ import type * as AutoModeClassifierModule from "../lib/auto-mode-classifier";
 import type { AutoModeVerdict } from "../lib/auto-mode-classifier";
 import { setupAutoMode } from "./auto-mode";
 
-const { updateAutoModeConfigMock, classifyAutoModeActionMock } = vi.hoisted(
-  () => ({
-    updateAutoModeConfigMock: vi.fn(),
-    classifyAutoModeActionMock: vi.fn(),
-  }),
-);
+const {
+  updateAutoModeConfigMock,
+  updatePromptTimeoutConfigMock,
+  classifyAutoModeActionMock,
+} = vi.hoisted(() => ({
+  updateAutoModeConfigMock: vi.fn(),
+  updatePromptTimeoutConfigMock: vi.fn(),
+  classifyAutoModeActionMock: vi.fn(),
+}));
 
 vi.mock("../config", async (importOriginal) => ({
   ...(await importOriginal<typeof ConfigModule>()),
   updateAutoModeConfig: updateAutoModeConfigMock,
+  updatePromptTimeoutConfig: updatePromptTimeoutConfigMock,
 }));
 
 vi.mock("../lib/auto-mode-classifier", async (importOriginal) => ({
@@ -56,6 +60,11 @@ const config: ResolvedConfig = {
       cacheTtlOptions: [],
       maxRetries: 3,
     },
+  },
+  promptTimeout: {
+    enabled: false,
+    timeoutMs: 30_000,
+    action: "deny",
   },
 };
 
@@ -674,5 +683,178 @@ describe("Leash auto-mode controls", () => {
       model: "test/active",
     });
     expect(statuses.get("leash-auto")).toContain("leash auto");
+  });
+
+  it("changes prompt timeout from /leash settings and persists it", async () => {
+    updatePromptTimeoutConfigMock.mockReset();
+    const localConfig = structuredClone(config);
+    const commands = new Map<
+      string,
+      { handler(args: string, ctx: unknown): Promise<void> }
+    >();
+    const rendered: string[] = [];
+    const steps = [
+      ["\x1b[B", "\x1b[B", "\r"],
+      ["\x1b[B", "\x1b[B", "\x1b[B", "\r"],
+      ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"],
+      ["\x1b"],
+    ];
+    let customCall = 0;
+    const pi = {
+      on() {},
+      registerCommand(
+        name: string,
+        definition: { handler(args: string, ctx: unknown): Promise<void> },
+      ) {
+        commands.set(name, definition);
+      },
+      registerShortcut() {},
+      appendEntry() {},
+    };
+    const ctx = {
+      hasUI: true,
+      ui: {
+        theme: {
+          fg: (_color: string, text: string) => text,
+          bold: (text: string) => text,
+        },
+        setStatus() {},
+        notify: vi.fn(),
+        custom<T>(
+          factory: (
+            tui: { requestRender(): void },
+            theme: {
+              fg(_color: string, text: string): string;
+              bold(text: string): string;
+            },
+            keybindings: unknown,
+            done: (value: T) => void,
+          ) => {
+            render(width: number): string[];
+            handleInput(data: string): void;
+          },
+        ): Promise<T> {
+          return new Promise((resolve) => {
+            const component = factory(
+              { requestRender() {} },
+              this.theme,
+              undefined,
+              resolve,
+            );
+            if (customCall === 0) {
+              rendered.push(component.render(80).join("\n"));
+            }
+            for (const key of steps[customCall] ?? []) {
+              component.handleInput(key);
+            }
+            customCall += 1;
+          });
+        },
+      },
+      sessionManager: { getBranch: () => [] },
+    };
+
+    setupAutoMode(pi as never, localConfig);
+    await commands.get("leash")?.handler("settings", ctx as never);
+
+    expect(rendered[0]).toContain("Prompt timeout: off");
+    expect(rendered[0]).toContain("Timeout action: auto-deny");
+    expect(rendered[0]).toContain("Timeout: 30s");
+    expect(localConfig.promptTimeout).toEqual({
+      enabled: true,
+      action: "allow",
+      timeoutMs: 60_000,
+    });
+    expect(updatePromptTimeoutConfigMock.mock.calls).toEqual([
+      [{ enabled: true }],
+      [{ action: "allow" }],
+      [{ timeoutMs: 60_000 }],
+    ]);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Leash prompt timeout: 1m.",
+      "info",
+    );
+  });
+
+  it("cycles prompt timeouts through 120m and wraps to 15s", async () => {
+    updatePromptTimeoutConfigMock.mockReset();
+    const localConfig = structuredClone(config);
+    localConfig.promptTimeout.timeoutMs = 3_600_000;
+    const commands = new Map<
+      string,
+      { handler(args: string, ctx: unknown): Promise<void> }
+    >();
+    const steps = [
+      ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"],
+      ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", "\r"],
+      ["\x1b"],
+    ];
+    let customCall = 0;
+    const pi = {
+      on() {},
+      registerCommand(
+        name: string,
+        definition: { handler(args: string, ctx: unknown): Promise<void> },
+      ) {
+        commands.set(name, definition);
+      },
+      registerShortcut() {},
+      appendEntry() {},
+    };
+    const ctx = {
+      hasUI: true,
+      ui: {
+        theme: {
+          fg: (_color: string, text: string) => text,
+          bold: (text: string) => text,
+        },
+        setStatus() {},
+        notify: vi.fn(),
+        custom<T>(
+          factory: (
+            tui: { requestRender(): void },
+            theme: {
+              fg(_color: string, text: string): string;
+              bold(text: string): string;
+            },
+            keybindings: unknown,
+            done: (value: T) => void,
+          ) => { handleInput(data: string): void },
+        ): Promise<T> {
+          return new Promise((resolve) => {
+            const component = factory(
+              { requestRender() {} },
+              this.theme,
+              undefined,
+              resolve,
+            );
+            for (const key of steps[customCall] ?? []) {
+              component.handleInput(key);
+            }
+            customCall += 1;
+          });
+        },
+      },
+      sessionManager: { getBranch: () => [] },
+    };
+
+    setupAutoMode(pi as never, localConfig);
+    await commands.get("leash")?.handler("settings", ctx as never);
+
+    expect(updatePromptTimeoutConfigMock.mock.calls).toEqual([
+      [{ timeoutMs: 7_200_000 }],
+      [{ timeoutMs: 15_000 }],
+    ]);
+    expect(localConfig.promptTimeout.timeoutMs).toBe(15_000);
+    expect(ctx.ui.notify).toHaveBeenNthCalledWith(
+      1,
+      "Leash prompt timeout: 120m.",
+      "info",
+    );
+    expect(ctx.ui.notify).toHaveBeenNthCalledWith(
+      2,
+      "Leash prompt timeout: 15s.",
+      "info",
+    );
   });
 });

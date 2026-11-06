@@ -4,7 +4,11 @@ import {
   ModelSelectorComponent,
 } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { type ResolvedConfig, updateAutoModeConfig } from "../config";
+import {
+  type ResolvedConfig,
+  updateAutoModeConfig,
+  updatePromptTimeoutConfig,
+} from "../config";
 import {
   AUTO_MODE_USER_DECISION_ENTRY_TYPE,
   type AutoModeAction,
@@ -14,6 +18,7 @@ import {
   getAutoModeModelLabel,
 } from "../lib/auto-mode-classifier";
 import { getModelRuntime } from "../lib/model-resolver";
+import type { ResolvedPromptTimeout } from "../prompt-timeout";
 
 const SESSION_ENTRY_TYPE = "leash-auto-mode";
 const VERDICT_ENTRY_TYPE = "leash-auto-verdict";
@@ -24,7 +29,43 @@ const CLASSIFIER_SLOW_WARNING_MS = 5_000;
 const AUTO_BUSY_FRAME_INTERVAL_MS = 180;
 const AUTO_BUSY_COLORS = ["accent", "warning", "success"] as const;
 
-type SettingsAction = "toggle" | "select-model" | "close";
+type SettingsAction =
+  | "toggle"
+  | "select-model"
+  | "toggle-prompt-timeout"
+  | "cycle-prompt-action"
+  | "cycle-prompt-duration"
+  | "close";
+
+const PROMPT_TIMEOUT_PRESETS_MS = [
+  15_000,
+  30_000,
+  60_000,
+  300_000,
+  900_000,
+  1_800_000,
+  3_600_000,
+  7_200_000,
+] as const;
+
+function formatPromptTimeout(timeoutMs: number): string {
+  if (timeoutMs % 60_000 === 0) return `${timeoutMs / 60_000}m`;
+  if (timeoutMs % 1_000 === 0) return `${timeoutMs / 1_000}s`;
+  return `${timeoutMs}ms`;
+}
+
+function nextPromptTimeoutMs(current: number): number {
+  return (
+    PROMPT_TIMEOUT_PRESETS_MS.find((preset) => preset > current) ??
+    PROMPT_TIMEOUT_PRESETS_MS[0]
+  );
+}
+
+function promptTimeoutActionLabel(
+  action: ResolvedPromptTimeout["action"],
+): string {
+  return action === "allow" ? "auto-allow once" : "auto-deny";
+}
 
 type RecordedVerdict = AutoModeVerdict & { timestamp: number };
 
@@ -174,14 +215,33 @@ async function showSettingsMenu(
   ctx: ExtensionContext,
   enabled: boolean,
   model: string | null,
+  promptTimeout: ResolvedPromptTimeout,
 ): Promise<SettingsAction> {
   return (
     (await ctx.ui.custom<SettingsAction | undefined>(
       (tui, theme, _kb, done) => {
-        const entries = [
-          `Auto mode: ${enabled ? "on" : "off"}`,
-          `Classifier model: ${model ?? "current Pi model"}`,
-          "Close",
+        const entries: { label: string; action: SettingsAction }[] = [
+          {
+            label: `Auto mode: ${enabled ? "on" : "off"}`,
+            action: "toggle",
+          },
+          {
+            label: `Classifier model: ${model ?? "current Pi model"}`,
+            action: "select-model",
+          },
+          {
+            label: `Prompt timeout: ${promptTimeout.enabled ? "on" : "off"}`,
+            action: "toggle-prompt-timeout",
+          },
+          {
+            label: `Timeout action: ${promptTimeoutActionLabel(promptTimeout.action)}`,
+            action: "cycle-prompt-action",
+          },
+          {
+            label: `Timeout: ${formatPromptTimeout(promptTimeout.timeoutMs)}`,
+            action: "cycle-prompt-duration",
+          },
+          { label: "Close", action: "close" },
         ];
         let selected = 0;
 
@@ -195,7 +255,9 @@ async function showSettingsMenu(
               const marker =
                 index === selected ? theme.fg("accent", "› ") : "  ";
               const text =
-                index === selected ? theme.fg("accent", entry) : entry;
+                index === selected
+                  ? theme.fg("accent", entry.label)
+                  : entry.label;
               return truncateToWidth(`${marker}${text}`, width);
             }),
           ];
@@ -216,13 +278,7 @@ async function showSettingsMenu(
             ) {
               done("close");
             } else if (matchesKey(data, Key.enter)) {
-              done(
-                selected === 0
-                  ? "toggle"
-                  : selected === 1
-                    ? "select-model"
-                    : "close",
-              );
+              done(entries[selected]?.action ?? "close");
             }
             tui.requestRender();
           },
@@ -248,7 +304,12 @@ async function showAutoModeSettings(
   let model = config.permissionGate.autoMode.model;
 
   while (true) {
-    const action = await showSettingsMenu(ctx, enabled, model);
+    const action = await showSettingsMenu(
+      ctx,
+      enabled,
+      model,
+      config.promptTimeout,
+    );
     if (action === "close") return;
     if (action === "toggle") {
       const next = !enabled;
@@ -256,6 +317,33 @@ async function showAutoModeSettings(
       updateAutoModeConfig({ enabled: next });
       config.permissionGate.autoMode.enabled = next;
       enabled = next;
+      continue;
+    }
+    if (action === "toggle-prompt-timeout") {
+      const next = !config.promptTimeout.enabled;
+      config.promptTimeout.enabled = next;
+      updatePromptTimeoutConfig({ enabled: next });
+      ctx.ui.notify(`Leash prompt timeout: ${next ? "on" : "off"}.`, "info");
+      continue;
+    }
+    if (action === "cycle-prompt-action") {
+      const next = config.promptTimeout.action === "allow" ? "deny" : "allow";
+      config.promptTimeout.action = next;
+      updatePromptTimeoutConfig({ action: next });
+      ctx.ui.notify(
+        `Leash prompt timeout action: ${promptTimeoutActionLabel(next)}.`,
+        "info",
+      );
+      continue;
+    }
+    if (action === "cycle-prompt-duration") {
+      const next = nextPromptTimeoutMs(config.promptTimeout.timeoutMs);
+      config.promptTimeout.timeoutMs = next;
+      updatePromptTimeoutConfig({ timeoutMs: next });
+      ctx.ui.notify(
+        `Leash prompt timeout: ${formatPromptTimeout(next)}.`,
+        "info",
+      );
       continue;
     }
 
@@ -502,7 +590,7 @@ export function setupAutoMode(
       }
       if (command === "" || command === "status") {
         ctx.ui.notify(
-          `Leash auto: ${enabled ? "on" : "off"}; classifier: ${getAutoModeModelLabel(config.permissionGate.autoMode, ctx)}.\n${formatAuditStatus(audit)}\nCtrl+Alt+L toggles. /leash settings applies and persists auto-mode and classifier changes immediately.`,
+          `Leash auto: ${enabled ? "on" : "off"}; classifier: ${getAutoModeModelLabel(config.permissionGate.autoMode, ctx)}.\nPrompt timeout: ${config.promptTimeout.enabled ? "on" : "off"}, ${promptTimeoutActionLabel(config.promptTimeout.action)} after ${formatPromptTimeout(config.promptTimeout.timeoutMs)}.\n${formatAuditStatus(audit)}\nCtrl+Alt+L toggles. /leash settings applies and persists auto-mode, classifier, and prompt-timeout changes immediately.`,
           "info",
         );
         return;
