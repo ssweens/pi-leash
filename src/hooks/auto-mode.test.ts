@@ -356,7 +356,8 @@ describe("Leash auto-mode controls", () => {
       sessionManager: { getBranch: () => [] },
     };
 
-    const controller = setupAutoMode(pi as never, config);
+    const runtime = { enabled: true };
+    const controller = setupAutoMode(pi as never, config, runtime);
     await eventHandlers.get("session_start")?.({}, ctx as never);
 
     await commands.get("leash")?.handler("auto", ctx as never);
@@ -381,6 +382,7 @@ describe("Leash auto-mode controls", () => {
     expect(statuses.get("leash-auto-verdict")).toContain("leash allow");
 
     await commands.get("leash")?.handler("status", ctx as never);
+    expect(notices.at(-1)).toContain("Pi Leash: on; auto mode: on");
     expect(notices.at(-1)).toContain("allow 1 · ask 0 · deny 0");
     expect(notices.at(-1)).toContain("Last: allow [classifier]");
 
@@ -392,6 +394,19 @@ describe("Leash auto-mode controls", () => {
     expect(notices).toContain(
       "Leash auto mode enabled. Dangerous Bash actions are classifier-gated.",
     );
+
+    await commands.get("leash")?.handler("off", ctx as never);
+    expect(runtime.enabled).toBe(false);
+    expect(controller.isEnabled()).toBe(false);
+    expect([...statuses.values()].every((value) => value === undefined)).toBe(
+      true,
+    );
+    const entryCount = entries.length;
+    await commands.get("leash")?.handler("on", ctx as never);
+    expect(runtime.enabled).toBe(true);
+    expect(controller.isEnabled()).toBe(false);
+    expect(entries).toHaveLength(entryCount);
+    expect(notices.at(-1)).toContain("Pi Leash enabled for this runtime");
   });
 
   it("rotates only the auto marker while the classifier is pending", async () => {

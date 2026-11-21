@@ -4,6 +4,7 @@ import { parse } from "../vendor/aliou-sh/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PolicyRule, Protection, ResolvedConfig } from "../config";
 import { emitBlocked } from "../utils/events";
+import type { LeashRuntimeState } from "./runtime";
 import { expandGlob, hasGlobChars } from "../utils/glob-expander";
 import {
   type CompiledPattern,
@@ -262,12 +263,18 @@ function extractPathTarget(input: Record<string, unknown>): string[] {
   return target ? [target] : [];
 }
 
-export function setupPoliciesHook(pi: ExtensionAPI, config: ResolvedConfig) {
+export function setupPoliciesHook(
+  pi: ExtensionAPI,
+  config: ResolvedConfig,
+  runtime: LeashRuntimeState = { enabled: true },
+) {
   if (!config.features.policies) return;
 
   const compiledRules = compileRules(config.policies.rules);
 
   pi.on("tool_call", async (event, ctx) => {
+    if (!runtime.enabled) return;
+
     const toolName = event.toolName;
     let targets: string[] = [];
 
@@ -276,6 +283,7 @@ export function setupPoliciesHook(pi: ExtensionAPI, config: ResolvedConfig) {
     } else if (toolName === "bash") {
       const command = String(event.input.command ?? "");
       targets = await extractBashFileTargets(command, compiledRules, ctx.cwd);
+      if (!runtime.enabled) return;
     } else {
       return;
     }
@@ -288,6 +296,7 @@ export function setupPoliciesHook(pi: ExtensionAPI, config: ResolvedConfig) {
         compiledRules,
         ctx.cwd,
       );
+      if (!runtime.enabled) return;
       if (!effective) continue;
 
       const blockedTools = BLOCKED_TOOLS[effective.protection];

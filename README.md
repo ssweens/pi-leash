@@ -207,16 +207,22 @@ The approval prompt now shows:
 
 For very long commands or explanations, the inline prompt clamps itself to a stable height so it stays within the terminal. The compact view may elide the middle of the preview, but the action choices remain visible and `v` opens a scrollable full-command view.
 
+### Runtime switch
+
+`/leash off` disables all Pi Leash guards for subsequent tool calls in the current Pi runtime. `/leash on` restores the configured guards. This switch is temporary and does not modify `pi-leash.json`. Pi's own tool permissions are unaffected.
+
+Use `/leash status` to see the runtime switch and auto-mode state. `/leash auto` and `/leash manual` control only auto mode; `Ctrl+Alt+L` and `/leash toggle` also toggle only auto mode.
+
 ### Auto mode (opt-in)
 
 Auto mode replaces only Pi Leash's dangerous-Bash confirmation path with a **separate classifier model**. It does not bypass Pi's own tool permissions, Leash policies, path-access checks, or `autoDenyPatterns`.
 
 Enable it per session with either:
 
-- `Ctrl+Alt+L` — toggle
-- `/leash auto` — enable
-- `/leash manual` — disable
-- `/leash toggle` or `/leash status`
+- `Ctrl+Alt+L` — toggle auto mode
+- `/leash auto` — enable auto mode
+- `/leash manual` — disable auto mode
+- `/leash toggle` — toggle auto mode
 
 `/leash settings` opens Pi's built-in `/model` selector. Its search, filtering, scopes, keybindings, refresh behavior, and rendering are identical to `/model`. Changes apply to the active session immediately and persist in `~/.pi/agent/settings/pi-leash.json`:
 
@@ -361,6 +367,21 @@ interface LeashBlockedEvent {
   userDenied?: boolean;
 }
 ```
+
+### `leash:prompt`
+
+Emitted when an interactive Leash prompt opens and resolves. Pi Leash emits this event only; **it does not write OSC 7501 to the terminal**. A host adapter must translate `opened` to OSC 7501 `state=blocked` and `resolved` to its active/working state. Messages are generic and omit commands, paths, and credentials.
+
+```ts
+interface LeashPromptEvent {
+  phase: "opened" | "resolved";
+  feature: "permissionGate" | "pathAccess";
+  kind: "permission" | "auth";
+  message: string;
+}
+```
+
+`permission` covers dangerous-command approval and outside-workspace access. `auth` covers sudo password entry. Policy denials and other non-interactive blocks do not emit this event.
 
 ### `leash:dangerous`
 

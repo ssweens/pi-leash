@@ -18,6 +18,7 @@ import {
   getAutoModeModelLabel,
 } from "../lib/auto-mode-classifier";
 import { getModelRuntime } from "../lib/model-resolver";
+import type { LeashRuntimeState } from "./runtime";
 import type { ResolvedPromptTimeout } from "../prompt-timeout";
 
 const SESSION_ENTRY_TYPE = "leash-auto-mode";
@@ -364,6 +365,7 @@ async function showAutoModeSettings(
 export function setupAutoMode(
   pi: ExtensionAPI,
   config: ResolvedConfig,
+  runtime: LeashRuntimeState = { enabled: true },
 ): AutoModeController {
   let enabled = config.permissionGate.autoMode.enabled;
   let audit = createAutoModeAudit();
@@ -386,7 +388,7 @@ export function setupAutoMode(
     verdict: RecordedVerdict,
     ctx: ExtensionContext,
   ) => {
-    if (!enabled) return;
+    if (!enabled || !runtime.enabled) return;
     if (verdictTimer) clearTimeout(verdictTimer);
 
     const color =
@@ -430,7 +432,7 @@ export function setupAutoMode(
   };
 
   const renderAutoStatus = (ctx: ExtensionContext) => {
-    if (!enabled) {
+    if (!enabled || !runtime.enabled) {
       ctx.ui.setStatus("leash-auto", undefined);
       ctx.ui.setStatus(CLASSIFIER_STATUS_KEY, undefined);
       return;
@@ -513,7 +515,7 @@ export function setupAutoMode(
   };
 
   const updateStatus = (ctx: ExtensionContext) => {
-    if (!enabled) {
+    if (!enabled || !runtime.enabled) {
       clearClassifierAnimation();
       ctx.ui.setStatus("leash-auto", undefined);
       ctx.ui.setStatus(CLASSIFIER_STATUS_KEY, undefined);
@@ -550,6 +552,15 @@ export function setupAutoMode(
     return true;
   };
 
+  const setRuntimeEnabled = (next: boolean, ctx: ExtensionContext) => {
+    runtime.enabled = next;
+    updateStatus(ctx);
+    ctx.ui.notify(
+      `Pi Leash ${next ? "enabled" : "disabled"} for this runtime. Auto mode is ${enabled ? "on" : "off"}.`,
+      "info",
+    );
+  };
+
   pi.registerShortcut(Key.ctrlAlt("l"), {
     description: "Toggle Leash auto mode",
     handler: async (ctx) => {
@@ -558,19 +569,27 @@ export function setupAutoMode(
   });
 
   pi.registerCommand("leash", {
-    description: "Manage Leash auto mode: auto, manual, settings, status",
+    description: "Manage Leash runtime and auto mode",
     getArgumentCompletions(prefix) {
-      return ["auto", "manual", "settings", "status", "toggle"]
+      return ["on", "off", "auto", "manual", "settings", "status", "toggle"]
         .filter((value) => value.startsWith(prefix.trim().toLowerCase()))
         .map((value) => ({ value, label: value }));
     },
     handler: async (args, ctx) => {
       const command = args.trim().toLowerCase();
-      if (command === "auto" || command === "on") {
+      if (command === "on") {
+        setRuntimeEnabled(true, ctx);
+        return;
+      }
+      if (command === "off") {
+        setRuntimeEnabled(false, ctx);
+        return;
+      }
+      if (command === "auto") {
         setEnabled(true, ctx);
         return;
       }
-      if (command === "manual" || command === "off") {
+      if (command === "manual") {
         setEnabled(false, ctx);
         return;
       }
@@ -590,13 +609,13 @@ export function setupAutoMode(
       }
       if (command === "" || command === "status") {
         ctx.ui.notify(
-          `Leash auto: ${enabled ? "on" : "off"}; classifier: ${getAutoModeModelLabel(config.permissionGate.autoMode, ctx)}.\nPrompt timeout: ${config.promptTimeout.enabled ? "on" : "off"}, ${promptTimeoutActionLabel(config.promptTimeout.action)} after ${formatPromptTimeout(config.promptTimeout.timeoutMs)}.\n${formatAuditStatus(audit)}\nCtrl+Alt+L toggles. /leash settings applies and persists auto-mode, classifier, and prompt-timeout changes immediately.`,
+          `Pi Leash: ${runtime.enabled ? "on" : "off"}; auto mode: ${enabled ? "on" : "off"}; classifier: ${getAutoModeModelLabel(config.permissionGate.autoMode, ctx)}.\nPrompt timeout: ${config.promptTimeout.enabled ? "on" : "off"}, ${promptTimeoutActionLabel(config.promptTimeout.action)} after ${formatPromptTimeout(config.promptTimeout.timeoutMs)}.\n${formatAuditStatus(audit)}\n/leash on|off controls all Leash hooks for this runtime. /leash auto|manual and Ctrl+Alt+L control classifier mode.`,
           "info",
         );
         return;
       }
       ctx.ui.notify(
-        "Usage: /leash [auto|manual|toggle|settings|status]",
+        "Usage: /leash [on|off|auto|manual|toggle|settings|status]",
         "warning",
       );
     },
@@ -653,6 +672,7 @@ export function setupAutoMode(
           config.permissionGate.autoMode,
           ctx,
         );
+        if (!runtime.enabled) return manualVerdict;
         // A sibling request may have failed while this one was pending.
         if (!enabled && verdict.decision === "allow") return manualVerdict;
         if (verdict.source === "fallback" && enabled) {

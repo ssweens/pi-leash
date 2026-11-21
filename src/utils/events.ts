@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const LEASH_BLOCKED_EVENT = "leash:blocked";
+export const LEASH_PROMPT_EVENT = "leash:prompt";
 export const LEASH_DANGEROUS_EVENT = "leash:dangerous";
 
 export interface LeashBlockedEvent {
@@ -11,17 +12,25 @@ export interface LeashBlockedEvent {
   userDenied?: boolean;
 }
 
+export interface LeashPromptEvent {
+  phase: "opened" | "resolved";
+  feature: "permissionGate" | "pathAccess";
+  kind: "permission" | "auth";
+  message: string;
+}
+
 export interface LeashDangerousEvent {
   command: string;
   description: string;
   pattern: string;
 }
 
-export function emitBlocked(
-  pi: ExtensionAPI,
-  event: LeashBlockedEvent,
-): void {
+export function emitBlocked(pi: ExtensionAPI, event: LeashBlockedEvent): void {
   pi.events.emit(LEASH_BLOCKED_EVENT, event);
+}
+
+export function emitPrompt(pi: ExtensionAPI, event: LeashPromptEvent): void {
+  pi.events.emit(LEASH_PROMPT_EVENT, event);
 }
 
 export function emitDangerous(

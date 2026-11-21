@@ -41,7 +41,7 @@ const config: ResolvedConfig = {
   },
 };
 
-function createHarness(action: "allow" | "deny") {
+function createHarness(action: "allow" | "deny", runtime = { enabled: true }) {
   const hookConfig = structuredClone(config);
   hookConfig.promptTimeout.action = action;
   const handlers = new Map<
@@ -50,6 +50,7 @@ function createHarness(action: "allow" | "deny") {
   >();
   const messages: string[] = [];
   const rendered: string[] = [];
+  const promptEvents: unknown[] = [];
   const fakePi = {
     on(
       event: string,
@@ -57,7 +58,11 @@ function createHarness(action: "allow" | "deny") {
     ) {
       handlers.set(event, handler);
     },
-    events: { emit() {} },
+    events: {
+      emit(name: string, event: unknown) {
+        if (name === "leash:prompt") promptEvents.push(event);
+      },
+    },
     sendMessage(message: { content?: unknown }) {
       if (typeof message.content === "string") messages.push(message.content);
     },
@@ -104,13 +109,14 @@ function createHarness(action: "allow" | "deny") {
     },
   };
 
-  setupPathAccessHook(fakePi as never, hookConfig);
+  setupPathAccessHook(fakePi as never, hookConfig, runtime);
   const toolCall = handlers.get("tool_call");
   if (!toolCall) throw new Error("Path access did not register tool_call");
 
   return {
     messages,
     rendered,
+    promptEvents,
     dispatch(filePath: string) {
       return toolCall(
         {
@@ -125,6 +131,15 @@ function createHarness(action: "allow" | "deny") {
 }
 
 describe("path access prompt timeout", () => {
+  it("bypasses path checks when Leash is off", async () => {
+    const runtime = { enabled: false };
+    const harness = createHarness("deny", runtime);
+
+    await expect(harness.dispatch("/etc/hosts")).resolves.toBeUndefined();
+    expect(harness.promptEvents).toEqual([]);
+    expect(harness.rendered).toEqual([]);
+  });
+
   it("auto-denies outside-workspace access and tells the agent", async () => {
     const harness = createHarness("deny");
 
@@ -137,6 +152,20 @@ describe("path access prompt timeout", () => {
     expect(harness.messages[0]).toContain("/etc/hosts");
     expect(harness.messages[0]).toContain("not a manual denial");
     expect(harness.rendered[0]).toContain("timeout in 1s → auto-deny");
+    expect(harness.promptEvents).toEqual([
+      {
+        phase: "opened",
+        feature: "pathAccess",
+        kind: "permission",
+        message: "Approval required for access outside the workspace",
+      },
+      {
+        phase: "resolved",
+        feature: "pathAccess",
+        kind: "permission",
+        message: "Approval required for access outside the workspace",
+      },
+    ]);
   });
 
   it("auto-allows once and asks again for the same path", async () => {

@@ -46,6 +46,22 @@ describe("DangerousReasonTrust", () => {
 });
 
 describe("reason-scoped trust through the Pi tool-call hook", () => {
+  it("lets dangerous commands pass when Leash is off", async () => {
+    const runtime = { enabled: false };
+    const harness = createHarness(
+      [],
+      undefined,
+      undefined,
+      false,
+      undefined,
+      runtime,
+    );
+
+    await expect(harness.dispatch("rm -rf ./target")).resolves.toBeUndefined();
+    expect(harness.promptEvents).toEqual([]);
+    expect(harness.messages).toEqual([]);
+  });
+
   const config: ResolvedConfig = {
     enabled: true,
     features: { policies: false, pathAccess: false, permissionGate: true },
@@ -98,6 +114,7 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
       waitForCustom?: boolean;
       promptTimeout?: ResolvedConfig["promptTimeout"];
     },
+    runtime = { enabled: true },
   ) {
     const hookConfig = structuredClone(config);
     if (autoDenyPattern) {
@@ -117,6 +134,12 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
     const selectTimeouts: Array<number | undefined> = [];
     const renderedDialogs: string[][] = [];
     const messages: string[] = [];
+    const promptEvents: unknown[] = [];
+    let resolveCustom: ((value: unknown) => void) | undefined;
+    let notifyCustomStarted: () => void = () => {};
+    const customStarted = new Promise<void>((resolve) => {
+      notifyCustomStarted = resolve;
+    });
     const fakePi = {
       on(
         event: string,
@@ -124,7 +147,11 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
       ) {
         handlers.set(event, handler);
       },
-      events: { emit() {} },
+      events: {
+        emit(name: string, event: unknown) {
+          if (name === "leash:prompt") promptEvents.push(event);
+        },
+      },
       sendMessage(message: { content?: unknown }) {
         if (typeof message.content === "string") messages.push(message.content);
       },
@@ -148,11 +175,13 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
             done: (result: unknown) => void,
           ) => { render(width: number): string[]; dispose?(): void },
         ) => {
+          notifyCustomStarted();
           let completed: unknown;
           let resolveDone: (value: unknown) => void = () => {};
           const donePromise = new Promise((resolve) => {
             resolveDone = resolve;
           });
+          resolveCustom = resolveDone;
           const component = factory(
             {
               terminal: { rows: 40, columns: 120 },
@@ -188,7 +217,7 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
       },
     };
 
-    setupPermissionGateHook(fakePi as never, hookConfig, autoMode);
+    setupPermissionGateHook(fakePi as never, hookConfig, autoMode, runtime);
     const toolCall = handlers.get("tool_call");
     if (!toolCall)
       throw new Error("Permission gate did not register tool_call");
@@ -198,6 +227,12 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
       selectTimeouts,
       renderedDialogs,
       messages,
+      promptEvents,
+      customStarted,
+      resolveCustom(value: unknown) {
+        if (!resolveCustom) throw new Error("No custom prompt is pending");
+        resolveCustom(value);
+      },
       dispatch(command: string) {
         return toolCall(
           { toolName: "bash", toolCallId: command, input: { command } },
@@ -258,6 +293,47 @@ describe("reason-scoped trust through the Pi tool-call hook", () => {
     });
     expect(verdicts).toEqual(["allow"]);
     expect(harness.selectOptions).toHaveLength(0);
+    expect(harness.promptEvents).toEqual([
+      {
+        phase: "opened",
+        feature: "permissionGate",
+        kind: "auth",
+        message: "Sudo password required",
+      },
+      {
+        phase: "resolved",
+        feature: "permissionGate",
+        kind: "auth",
+        message: "Sudo password required",
+      },
+    ]);
+  });
+
+  it("reports an open permission prompt before it resolves", async () => {
+    const harness = createHarness([], undefined, undefined, false, {
+      waitForCustom: true,
+    });
+    const result = harness.dispatch("rm -rf ./private-target");
+    await harness.customStarted;
+
+    expect(harness.promptEvents).toEqual([
+      {
+        phase: "opened",
+        feature: "permissionGate",
+        kind: "permission",
+        message: "Approval required for a dangerous command",
+      },
+    ]);
+    harness.resolveCustom("deny");
+    await expect(result).resolves.toEqual({
+      block: true,
+      reason: "User denied dangerous command",
+    });
+    expect(harness.promptEvents).toHaveLength(2);
+    expect(harness.promptEvents[1]).toMatchObject({ phase: "resolved" });
+    expect(JSON.stringify(harness.promptEvents)).not.toContain(
+      "private-target",
+    );
   });
 
   it("bypasses only the granted reason and keeps additional reasons gated", async () => {

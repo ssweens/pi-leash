@@ -35,13 +35,14 @@ import {
   sudoTimeoutMessage,
 } from "../prompt-timeout";
 import { extractBashPathCandidates } from "../utils/bash-paths";
-import { emitBlocked, emitDangerous } from "../utils/events";
+import { emitBlocked, emitDangerous, emitPrompt } from "../utils/events";
 import {
   type CompiledPattern,
   compileCommandPatterns,
 } from "../utils/matching";
 import { isWithinBoundary } from "../utils/path";
 import { walkCommands, wordToString } from "../utils/shell-utils";
+import type { LeashRuntimeState } from "./runtime";
 import { parse } from "../vendor/aliou-sh/index";
 import type { AutoModeController } from "./auto-mode";
 import {
@@ -416,6 +417,43 @@ async function executeSudoCommand(
  * A duration of 0 means "don't cache".
  */
 async function promptForSudoPassword(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  command: string,
+  cacheEnabled: boolean,
+  cacheTtlOptions: CacheTtlOption[],
+  promptTimeout: ResolvedPromptTimeout,
+  errorMessage?: string,
+  attemptsRemaining?: number,
+): Promise<SudoPasswordPromptResult | SudoPasswordTimeout | null> {
+  const message = "Sudo password required";
+  emitPrompt(pi, {
+    phase: "opened",
+    feature: "permissionGate",
+    kind: "auth",
+    message,
+  });
+  try {
+    return await promptForSudoPasswordImpl(
+      ctx,
+      command,
+      cacheEnabled,
+      cacheTtlOptions,
+      promptTimeout,
+      errorMessage,
+      attemptsRemaining,
+    );
+  } finally {
+    emitPrompt(pi, {
+      phase: "resolved",
+      feature: "permissionGate",
+      kind: "auth",
+      message,
+    });
+  }
+}
+
+async function promptForSudoPasswordImpl(
   ctx: ExtensionContext,
   command: string,
   cacheEnabled: boolean,
@@ -996,6 +1034,7 @@ export function setupPermissionGateHook(
   pi: ExtensionAPI,
   config: ResolvedConfig,
   autoMode?: AutoModeController,
+  runtime: LeashRuntimeState = { enabled: true },
 ) {
   if (!config.features.permissionGate) return;
 
@@ -1062,7 +1101,7 @@ export function setupPermissionGateHook(
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!isToolCallEventType("bash", event)) return;
+    if (!runtime.enabled || !isToolCallEventType("bash", event)) return;
 
     const command = event.input.command;
     const autoActive = autoMode?.isEnabled() ?? false;
@@ -1133,6 +1172,7 @@ export function setupPermissionGateHook(
       CWD_BYPASS_ELIGIBLE_DESCRIPTIONS.has(m.description),
     );
     const cwdScopedDangerous = await isCwdScopedFileOperation(command, ctx.cwd);
+    if (!runtime.enabled) return;
     const sudoMode = config.permissionGate.sudoMode;
     const sudoCommand = isSudoCommand(command);
     let autoApprovedSudo = false;
@@ -1147,6 +1187,7 @@ export function setupPermissionGateHook(
         pattern: rawPattern,
       };
       const verdict = await autoMode.classify(action, ctx);
+      if (!runtime.enabled) return;
       autoMode.recordVerdict(verdict, ctx);
       classifierReason = verdict.reason;
       if (verdict.decision === "allow") {
@@ -1210,6 +1251,7 @@ export function setupPermissionGateHook(
           config.permissionGate.explainTimeout,
           ctx,
         );
+        if (!runtime.enabled) return;
         explanation = explainResult.explanation;
         if (explainResult.modelMissing) {
           ctx.ui.notify("Explanation model not found", "warning");
@@ -1232,7 +1274,16 @@ export function setupPermissionGateHook(
 
       const promptTimeout = config.promptTimeout;
 
-      let result = await ctx.ui.custom<ConfirmResult | undefined>(
+      const promptMessage = "Approval required for a dangerous command";
+      if (!autoApprovedSudo) {
+        emitPrompt(pi, {
+          phase: "opened",
+          feature: "permissionGate",
+          kind: "permission",
+          message: promptMessage,
+        });
+      }
+      const customPrompt = ctx.ui.custom<ConfirmResult | undefined>(
         (
           tui: {
             terminal?: { rows?: number; columns?: number };
@@ -1525,6 +1576,29 @@ export function setupPermissionGateHook(
           };
         },
       );
+      void customPrompt.then(
+        (result) => {
+          if (!autoApprovedSudo && result !== undefined) {
+            emitPrompt(pi, {
+              phase: "resolved",
+              feature: "permissionGate",
+              kind: "permission",
+              message: promptMessage,
+            });
+          }
+        },
+        () => {
+          if (!autoApprovedSudo) {
+            emitPrompt(pi, {
+              phase: "resolved",
+              feature: "permissionGate",
+              kind: "permission",
+              message: promptMessage,
+            });
+          }
+        },
+      );
+      let result = await customPrompt;
 
       if (result === undefined) {
         const approvalOptions: Array<{ label: string; value: ConfirmResult }> =
@@ -1565,22 +1639,32 @@ export function setupPermissionGateHook(
           : promptTimeout.action === "allow"
             ? `No explicit allow within ${promptTimeoutSeconds(promptTimeout.timeoutMs)}s denies. This dialog cannot auto-allow.`
             : `No choice within ${promptTimeoutSeconds(promptTimeout.timeoutMs)}s: auto-deny.`;
-        const selected = await ctx.ui.select(
-          [
-            "Dangerous Command Detected",
-            `Reason: ${description}`,
-            `Source: ${sourceLabel}`,
-            `Trigger: ${rawPattern}`,
-            `Command: ${command}`,
-            timeoutNote,
-          ]
-            .filter(Boolean)
-            .join("\n"),
-          approvalOptions.map((option) => option.label),
-          promptTimeout.enabled
-            ? { timeout: promptTimeout.timeoutMs }
-            : undefined,
-        );
+        let selected: string | undefined;
+        try {
+          selected = await ctx.ui.select(
+            [
+              "Dangerous Command Detected",
+              `Reason: ${description}`,
+              `Source: ${sourceLabel}`,
+              `Trigger: ${rawPattern}`,
+              `Command: ${command}`,
+              timeoutNote,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            approvalOptions.map((option) => option.label),
+            promptTimeout.enabled
+              ? { timeout: promptTimeout.timeoutMs }
+              : undefined,
+          );
+        } finally {
+          emitPrompt(pi, {
+            phase: "resolved",
+            feature: "permissionGate",
+            kind: "permission",
+            message: promptMessage,
+          });
+        }
         if (selected === undefined && promptTimeout.enabled) {
           result = "fallback-dismiss";
         } else {
@@ -1723,6 +1807,7 @@ export function setupPermissionGateHook(
           if (password === null) {
             const attemptsRemaining = maxAttempts - attemptsUsed;
             const promptResult = await promptForSudoPassword(
+              pi,
               ctx,
               command,
               sudoMode.cacheEnabled,

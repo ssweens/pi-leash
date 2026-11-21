@@ -32,7 +32,8 @@ import {
   type ResolvedPromptTimeout,
 } from "../prompt-timeout";
 import { extractBashPathCandidates } from "../utils/bash-paths";
-import { emitBlocked } from "../utils/events";
+import { emitBlocked, emitPrompt } from "../utils/events";
+import type { LeashRuntimeState } from "./runtime";
 import {
   normalizeForDisplay,
   resolveFromCwd,
@@ -320,6 +321,7 @@ function persistAlwaysGrant(storagePath: string): void {
 export function setupPathAccessHook(
   pi: ExtensionAPI,
   config: ResolvedConfig,
+  runtime: LeashRuntimeState = { enabled: true },
 ): void {
   if (!config.features.pathAccess || config.pathAccess.mode === "allow") return;
 
@@ -327,6 +329,8 @@ export function setupPathAccessHook(
   const sessionGrants: string[] = [];
 
   pi.on("tool_call", async (event, ctx) => {
+    if (!runtime.enabled) return;
+
     const toolName = event.toolName;
     let absolutePaths: string[] = [];
 
@@ -338,6 +342,7 @@ export function setupPathAccessHook(
     } else if (toolName === "bash") {
       const command = String(input.command ?? "");
       absolutePaths = await extractBashPathCandidates(command, ctx.cwd);
+      if (!runtime.enabled) return;
     } else {
       return;
     }
@@ -351,6 +356,8 @@ export function setupPathAccessHook(
     const isDirectoryTool = toolName === "ls" || toolName === "find";
 
     for (const absPath of absolutePaths) {
+      if (!runtime.enabled) return;
+
       // Build state with config + session grants + pending grants from this loop
       const resolvedAllowed = resolveAllowedPaths(
         config.pathAccess.allowedPaths,
@@ -393,16 +400,34 @@ export function setupPathAccessHook(
       const displayDir = normalizeForDisplay(parentDir, ctx.cwd);
       const showFileOptions = !isDirectoryTool;
 
-      const result = await ctx.ui.custom<PromptResult>(
-        createPromptComponent(
-          toolName,
-          displayPath,
-          displayDir,
-          ctx.cwd,
-          showFileOptions,
-          config.promptTimeout,
-        ),
-      );
+      const promptMessage =
+        "Approval required for access outside the workspace";
+      emitPrompt(pi, {
+        phase: "opened",
+        feature: "pathAccess",
+        kind: "permission",
+        message: promptMessage,
+      });
+      let result: PromptResult;
+      try {
+        result = await ctx.ui.custom<PromptResult>(
+          createPromptComponent(
+            toolName,
+            displayPath,
+            displayDir,
+            ctx.cwd,
+            showFileOptions,
+            config.promptTimeout,
+          ),
+        );
+      } finally {
+        emitPrompt(pi, {
+          phase: "resolved",
+          feature: "pathAccess",
+          kind: "permission",
+          message: promptMessage,
+        });
+      }
 
       if (result === "timeout-allow" || result === "timeout-deny") {
         const message = autoPromptMessage({

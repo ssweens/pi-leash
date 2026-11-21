@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 ### Added
+- Runtime `/leash on` and `/leash off` controls for all Leash guards, plus `/leash status` reporting runtime and auto-mode state.
+- `leash:prompt` lifecycle events for interactive permission and sudo-auth prompts, enabling host integrations to report blocked status.
 - `/leash settings` edits prompt timeout: on/off, auto-deny or auto-allow once, and a deadline from 15s through 120m (15s, 30s, 1m, 5m, 15m, 30m, 60m, 120m). Changes apply immediately and persist in `pi-leash.json`.
 - Opt-in `promptTimeout` for unanswered permission and path-access prompts. After `timeoutMs` (default 30s) the dialog dismisses and either auto-allows once or auto-denies. The agent is told the decision was automatic. Auto-allow does not create a session, reason, or persistent grant. Sudo password prompts always auto-deny, because a password cannot be auto-accepted. Plain select/input fallbacks dismiss too, but they cannot tell cancel from timeout, so they do not auto-allow.
 - Classifier-backed **Leash auto mode** for dangerous Bash operations. `Ctrl+Alt+L` and `/leash auto|manual|toggle` control a session-scoped mode; `/leash settings` applies changes immediately, persists the next-session initial state, and reuses Pi's built-in provider/model selector for its dedicated classifier.
@@ -15,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Bounded session-and-resume history of the last 20 interactive dangerous-command approvals and denials, supplied to the classifier only as non-authoritative evidence for equivalent actions.
 
 ### Changed
+- `/leash on` and `/leash off` now control all Leash guards at runtime; `/leash auto` and `/leash manual` control classifier mode.
 - The first auto-mode classifier failure now switches to manual approval and saves that mode for resumed and new sessions. `/leash auto` retries in the current session; `/leash settings` saves auto mode for new sessions. Normal classifier `ask` verdicts do not disable auto mode.
 - Pending auto-mode checks show the classifier model, elapsed time, and timeout in the footer, with a warning after five seconds or half the timeout.
 - `sudo` is now an explicit-intent auto-mode soft gate rather than a hard deny. An auto approval skips only generic dangerous-command confirmation; Leash's dedicated sudo password flow still runs.
