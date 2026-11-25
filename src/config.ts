@@ -272,7 +272,7 @@ const DEFAULT_SECRET_FILES_RULE: PolicyRule = {
 const DEFAULT_DANGEROUS_PATTERNS: DangerousPattern[] = [
   { pattern: "rm -rf", description: "recursive force delete" },
   { pattern: "sudo", description: "superuser command" },
-  { pattern: "dd if=", description: "disk write operation" },
+  { pattern: "dd of=", description: "disk write operation" },
   { pattern: "mkfs.", description: "filesystem format" },
   { pattern: "chmod -R 777", description: "insecure recursive permissions" },
   { pattern: "chown -R", description: "recursive ownership change" },

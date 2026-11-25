@@ -48,6 +48,8 @@ import type { AutoModeController } from "./auto-mode";
 import {
   BUILTIN_KEYWORD_PATTERNS,
   BUILTIN_MATCHERS,
+  collectSimpleCommandMatches,
+  stripCommandWords,
 } from "./dangerous-commands";
 
 /**
@@ -317,7 +319,7 @@ function isSudoCommand(command: string): boolean {
     const { ast } = parse(command);
     let foundSudo = false;
     walkCommands(ast, (cmd) => {
-      const words = (cmd.words ?? []).map(wordToString);
+      const words = stripCommandWords((cmd.words ?? []).map(wordToString));
       if (words[0] === "sudo") {
         foundSudo = true;
         return true;
@@ -816,6 +818,20 @@ function triggerForBuiltinDescription(description: string): string {
       return "docker/podman socket mount";
     case "branch switch or discard uncommitted changes":
       return "git checkout";
+    case "undo commits or discard staged/unstaged changes":
+      return "git reset";
+    case "git clean (deletes untracked files)":
+      return "git clean";
+    case "git force push":
+      return "git push --force";
+    case "find -delete":
+      return "find -delete";
+    case "download piped into a shell":
+      return "pipe-to-shell";
+    case "command name comes from a variable":
+      return "dynamic-command";
+    case "runs code that mentions a dangerous command":
+      return "indirect-exec";
     default:
       return description;
   }
@@ -893,6 +909,14 @@ function collectBuiltinDangerousMatches(
 
     return false;
   });
+
+  for (const { description } of collectSimpleCommandMatches(command)) {
+    addMatch({
+      description,
+      pattern: triggerForBuiltinDescription(description),
+      source: "builtin-structural",
+    });
+  }
 
   return matches;
 }

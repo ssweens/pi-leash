@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { BUILTIN_MATCHERS, matchDangerousCommand } from "./dangerous-commands";
+import {
+  BUILTIN_MATCHERS,
+  collectSimpleCommandMatches,
+  matchDangerousCommand,
+} from "./dangerous-commands";
 
 /**
  * Helper to run all matchers against a command string.
@@ -350,5 +354,65 @@ describe("matchDangerousCommand", () => {
     // sudo comes before dd in the matcher list
     const result = matchDangerousCommand(["sudo", "dd", "of=/dev/sda"]);
     expect(result?.pattern).toBe("sudo");
+  });
+});
+
+describe("shell wrappers, bypasses, literal variables, and heredocs", () => {
+  const descriptions = (cmd: string) =>
+    collectSimpleCommandMatches(cmd).map((m) => m.description);
+
+  it("matches wrapped and escaped dangerous commands", () => {
+    const cases: [string, string][] = [
+      ["/bin/rm -rf x", "recursive force delete"],
+      ["eval 'rm -rf x'", "recursive force delete"],
+      ["bash -lc 'rm -rf x'", "recursive force delete"],
+      ["zsh -c 'sudo ls'", "superuser command"],
+      ["$'\x72m' -rf x", "recursive force delete"],
+      ["nice -n 5 rm -rf x", "recursive force delete"],
+      ["timeout -s KILL 5 rm -rf x", "recursive force delete"],
+      ["env -u A rm -rf x", "recursive force delete"],
+      ["env -S 'rm -rf x'", "recursive force delete"],
+      ["echo x | xargs -n 1 rm -rf", "recursive force delete"],
+      ["find . -delete", "find -delete"],
+      ["find . -execdir rm {} +", "find -delete"],
+      ["find . -exec sudo ls {} ;", "superuser command"],
+      [
+        "git -C repo reset --hard",
+        "undo commits or discard staged/unstaged changes",
+      ],
+      ["git -c a=b push --force", "git force push"],
+      ["git --git-dir=x clean -fd", "git clean (deletes untracked files)"],
+      [`rm\${IFS}-rf x`, "recursive force delete"],
+      ["{rm,-rf,x}", "recursive force delete"],
+      ["curl x | /bin/bash", "download piped into a shell"],
+      ["watch rm -rf x", "runs code that mentions a dangerous command"],
+      ["$cmd -rf x", "command name comes from a variable"],
+    ];
+    for (const [command, expected] of cases) {
+      expect(descriptions(command)).toContain(expected);
+    }
+  });
+
+  it("resolves top-level literal variable assignments and ignores data heredocs", () => {
+    const chrome =
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    expect(
+      descriptions(
+        `CH="${chrome}"; "$CH" --headless=new --screenshot=/tmp/a.png file://$PWD/a.html`,
+      ),
+    ).toEqual([]);
+    expect(descriptions("X=rm; $X -rf /")).toContain("recursive force delete");
+    expect(descriptions("X=sudo; $X ls")).toContain("superuser command");
+    expect(
+      descriptions(`python3 - <<'E'\nprint('$f',a==b,len(a))\nx = \${z}\nE`),
+    ).toEqual([]);
+    expect(descriptions("bash <<'E'\nrm -rf /\nE")).toContain(
+      "recursive force delete",
+    );
+    expect(
+      descriptions(
+        `S=/Volumes/DabbleFiles/tmp/engruv-canary.e3keat; set -o pipefail; { tar -C "$S/flamingo-image.CB1i23" -cf - Dockerfile musicflamingo.py | ssh -o BatchMode=yes bigkahuna@192.168.1.52 'docker build --pull=false -t candidate - && docker run --rm --network=none --entrypoint python3 candidate -c "print(1)"'; }`,
+      ),
+    ).toEqual([]);
   });
 });
