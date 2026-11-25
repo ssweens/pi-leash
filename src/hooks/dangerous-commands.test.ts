@@ -414,5 +414,10 @@ describe("shell wrappers, bypasses, literal variables, and heredocs", () => {
         `S=/Volumes/DabbleFiles/tmp/engruv-canary.e3keat; set -o pipefail; { tar -C "$S/flamingo-image.CB1i23" -cf - Dockerfile musicflamingo.py | ssh -o BatchMode=yes bigkahuna@192.168.1.52 'docker build --pull=false -t candidate - && docker run --rm --network=none --entrypoint python3 candidate -c "print(1)"'; }`,
       ),
     ).toEqual([]);
+    expect(
+      descriptions(
+        'S=/Volumes/DabbleFiles/tmp/engruv-canary.e3keat; C=/Volumes/DabbleFiles/src/crater; W=/Users/ssweens/Spaces/crater/crater; D=$S/batch-ten-complete.836lo0mr; P=$C/.venv/bin/python; M=$C/data/v9_assets/hf_package; set -o pipefail; (env TMPDIR="$S/tmp" "$P" -B -u "$S/build-v5-batch-vocab.py" && cd "$W" && env TMPDIR="$S/tmp" "$P" -B -X faulthandler -u "$S/query-batch-v5-fusion.py") 2>&1 | tee "$S/query-batch-v5-fusion.log"',
+      ),
+    ).toEqual([]);
   });
 });

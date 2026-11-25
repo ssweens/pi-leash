@@ -877,7 +877,6 @@ const SETTERS = new Set([
   "readonly",
   "export",
   "unset",
-  "set",
   "getopts",
   "mapfile",
   "readarray",
@@ -912,12 +911,7 @@ const DANGER =
   /\b(?:rm\s+(?:-\S*[rRf]|--)|sudo|doas|pkexec|mkfs|shred|dd\s[^|;&]*of=|git\s+(?:\S+\s+)*(?:reset|clean|push)|diskutil|wipefs|chmod\s+-\S*R|chown\s+-\S*R)\b/;
 
 const mentions = (name: string, text: string) =>
-  new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).test(
-    text.replace(
-      new RegExp(`\\$\\{${name}\\}|\\$${name}(?![A-Za-z0-9_])`, "g"),
-      "",
-    ),
-  );
+  new RegExp(`(?:^|[\\s;&|()])${name}\\+?=`).test(text);
 
 /**
  * Evaluate all simple commands in `command` (including `eval`, `sh -c`, `env -S`, `find -exec`,
@@ -944,7 +938,20 @@ export function collectSimpleCommandMatches(
   simples.forEach((s0, i) => {
     let s = s0;
     if (track && s0.main) {
-      const m = LITERAL.exec(s0.text);
+      const expanded =
+        /^[A-Za-z_][A-Za-z0-9_]*=/.test(s0.text) && !s0.text.includes("'")
+          ? s0.text.replace(
+              /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
+              (raw, a, b) => {
+                const val = lits.get((a ?? b) as string);
+                return val !== undefined &&
+                  !/[\s"'$`\\;&|()<>*?[\]{}~!#^]/.test(val)
+                  ? val
+                  : raw;
+              },
+            )
+          : s0.text;
+      const m = LITERAL.exec(expanded);
       const set =
         m &&
         !s0.sub &&
@@ -966,7 +973,7 @@ export function collectSimpleCommandMatches(
       if (lit !== undefined && varName !== undefined) {
         const bare =
           !/[\s*?[\]{}~!#^]/.test(lit) ||
-          new RegExp(`^"\\$\\{?${varName}\\}?"`).test(s0.text);
+          new RegExp(`(?:^|\\s)"\\$\\{?${varName}\\}?"(?:\\s|$)`).test(s0.text);
         const firstStripped = stripCommandWords(s0.words)[0];
         const k = s0.words.findIndex(
           (x, n) =>
