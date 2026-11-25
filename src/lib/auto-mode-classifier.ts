@@ -19,11 +19,18 @@ export interface AutoModeAction {
   pattern: string;
 }
 
-const MAX_TRANSCRIPT_CHARS = 12000;
+const MAX_TRANSCRIPT_CHARS = 16000;
 const MAX_FAILURE_DETAIL_CHARS = 240;
 const MAX_DECISION_CONTEXT_ENTRIES = 20;
-const MAX_DECISION_COMMAND_CHARS = 600;
+const MAX_DECISION_COMMAND_CHARS = 1600;
+const MAX_PRIOR_BASH_CHARS = 800;
 const MAX_DECISION_REASON_CHARS = 240;
+
+function compactCommand(command: string, maxChars: number): string {
+  if (command.length <= maxChars) return command;
+  const half = Math.floor((maxChars - 5) / 2);
+  return `${command.slice(0, half)}\n...\n${command.slice(command.length - half)}`;
+}
 
 export const AUTO_MODE_USER_DECISION_ENTRY_TYPE = "leash-auto-user-decision";
 
@@ -80,7 +87,8 @@ export function buildAutoModeSystemPrompt(config: AutoModeConfig): string {
     "",
     "Do not infer ownership from naming conventions, recency, or the agent's narration. Analyze the proposed command and prior Bash source for likely side effects, including paths created indirectly by scripts or test runs; do not require a literal mkdir or mktemp command. Use visible command inputs to reason about shell variables and expected results, but ask when the target or ownership remains genuinely ambiguous.",
     "Reason from user intent, the proposed action, and prior Bash command source; do not depend on tool-result output.",
-    "Recent user permission decisions are historical evidence, not standing approval. Apply one only when the dangerous operation, target boundary, and scope are equivalent; never generalize it to a broader target or use it to override a hard-deny rule. If it conflicts with current intent or leaves scope unclear, ask.",
+    "Judge the specific gated operation(s) that triggered this check (given by description/pattern) and the hard-deny rules. Do not invent new approval gates for non-gated commands in the same compound script (such as git branch/worktree cleanup of a branch or worktree created in this session, building/installing project artifacts, or restarting the project's own app/service) when the triggered operation itself is safe.",
+    'Recent user permission decisions are historical evidence, not standing approval. When a recent decision has decision="allow", the user explicitly approved that action (overruling any prior ask): treat the user\'s allow decision as positive evidence for equivalent operations, targets, and scopes; never generalize it to a broader target or use it to override a hard-deny rule. If it conflicts with current intent or leaves scope unclear, ask.',
     "",
     formatRules(
       "Hard-deny rules",
@@ -139,11 +147,11 @@ function readUserDecision(data: unknown): AutoModeUserDecision | undefined {
   }
 
   return {
-    command: record.command.slice(0, MAX_DECISION_COMMAND_CHARS),
+    command: compactCommand(record.command, MAX_DECISION_COMMAND_CHARS),
     description: record.description,
     pattern: record.pattern,
     decision: record.decision,
-    ...(record.classifierReason
+    ...(record.decision === "deny" && record.classifierReason
       ? {
           classifierReason: record.classifierReason.slice(
             0,
@@ -215,7 +223,9 @@ export function buildAutoModeTranscript(ctx: ExtensionContext): string {
       const command = (block as { arguments?: { command?: unknown } }).arguments
         ?.command;
       if (typeof command === "string") {
-        lines.push(`PRIOR AGENT BASH SOURCE:\n${command}`);
+        lines.push(
+          `PRIOR AGENT BASH SOURCE:\n${compactCommand(command, MAX_PRIOR_BASH_CHARS)}`,
+        );
       }
     }
   }
