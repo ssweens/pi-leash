@@ -300,7 +300,7 @@ function mergeConfig(userConfig: GuardrailsConfig): ResolvedConfig {
     explainModel: pg.explainModel ?? null,
     explainTimeout: pg.explainTimeout ?? 5000,
     autoMode: {
-      enabled: pg.autoMode?.enabled ?? false,
+      enabled: pg.autoMode?.enabled ?? true,
       model: pg.autoMode?.model?.trim() || null,
       timeout: Math.max(1000, pg.autoMode?.timeout ?? 10000),
       environment: (pg.autoMode?.environment ?? []).filter(

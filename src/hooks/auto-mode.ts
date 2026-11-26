@@ -18,8 +18,8 @@ import {
   getAutoModeModelLabel,
 } from "../lib/auto-mode-classifier";
 import { getModelRuntime } from "../lib/model-resolver";
-import type { LeashRuntimeState } from "./runtime";
 import type { ResolvedPromptTimeout } from "../prompt-timeout";
+import type { LeashRuntimeState } from "./runtime";
 
 const SESSION_ENTRY_TYPE = "leash-auto-mode";
 const VERDICT_ENTRY_TYPE = "leash-auto-verdict";
@@ -39,14 +39,7 @@ type SettingsAction =
   | "close";
 
 const PROMPT_TIMEOUT_PRESETS_MS = [
-  15_000,
-  30_000,
-  60_000,
-  300_000,
-  900_000,
-  1_800_000,
-  3_600_000,
-  7_200_000,
+  15_000, 30_000, 60_000, 300_000, 900_000, 1_800_000, 3_600_000, 7_200_000,
 ] as const;
 
 function formatPromptTimeout(timeoutMs: number): string {
@@ -676,18 +669,8 @@ export function setupAutoMode(
         // A sibling request may have failed while this one was pending.
         if (!enabled && verdict.decision === "allow") return manualVerdict;
         if (verdict.source === "fallback" && enabled) {
-          setEnabled(false, ctx, false);
-          config.permissionGate.autoMode.enabled = false;
-          try {
-            updateAutoModeConfig({ enabled: false });
-          } catch {
-            ctx.ui.notify(
-              "Leash could not save manual mode. This session remains manual, but new sessions may still start in auto mode.",
-              "warning",
-            );
-          }
           ctx.ui.notify(
-            `Leash auto (${modelLabel}): ${verdict.reason} Switched to manual approval. /leash auto re-enables it for this session; /leash settings saves it for new sessions.`,
+            `Leash auto (${modelLabel}): ${verdict.reason} Falling back to manual approval for this action.`,
             "warning",
           );
         }

@@ -136,18 +136,11 @@ describe("Leash classifier failure fallback", () => {
     "Auto-mode classifier failed: provider unavailable.",
     "Auto-mode classifier model setup failed: model not found.",
     "Auto-mode classifier returned an invalid verdict.",
-  ])("stays manual after %s until the user re-enables auto", async (reason) => {
+  ])("asks for that action on %s while keeping auto mode enabled and config untouched", async (reason) => {
     classifyAutoModeActionMock.mockReset();
     updateAutoModeConfigMock.mockReset();
-    const {
-      controller,
-      ctx,
-      commands,
-      entries,
-      handlers,
-      localConfig,
-      statuses,
-    } = autoModeHarness();
+    const { controller, ctx, handlers, localConfig, statuses } =
+      autoModeHarness();
     const fallback: AutoModeVerdict = {
       decision: "ask",
       source: "fallback",
@@ -156,36 +149,25 @@ describe("Leash classifier failure fallback", () => {
     classifyAutoModeActionMock.mockResolvedValueOnce(fallback);
     expect(await controller.classify(action, ctx as never)).toEqual(fallback);
     controller.recordVerdict(fallback, ctx as never);
-    expect(controller.isEnabled()).toBe(false);
-    expect(entries).toContainEqual({
-      type: "custom",
-      customType: "leash-auto-mode",
-      data: { enabled: false },
-    });
-    expect(updateAutoModeConfigMock).toHaveBeenCalledExactlyOnceWith({
-      enabled: false,
-    });
-    expect(localConfig.permissionGate.autoMode.enabled).toBe(false);
-    expect(statuses.get("leash-auto")).toBeUndefined();
+    expect(controller.isEnabled()).toBe(true);
+    expect(updateAutoModeConfigMock).not.toHaveBeenCalled();
+    expect(localConfig.permissionGate.autoMode.enabled).toBe(true);
     expect(statuses.get("leash-auto-pending")).toBeUndefined();
     expect(ctx.ui.notify).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining(`${reason} Switched to manual approval.`),
+      expect.stringContaining(
+        `${reason} Falling back to manual approval for this action.`,
+      ),
       "warning",
     );
-    await controller.classify(action, ctx as never);
-    expect(classifyAutoModeActionMock).toHaveBeenCalledTimes(1);
-    await handlers.get("session_start")?.({}, ctx as never);
-    expect(controller.isEnabled()).toBe(false);
-    await commands.get("leash")?.handler("auto", ctx as never);
     classifyAutoModeActionMock.mockResolvedValueOnce({
       decision: "allow",
       source: "classifier",
-      reason: "Recovered.",
+      reason: "Recovered on next action.",
     });
     expect(await controller.classify(action, ctx as never)).toMatchObject({
       decision: "allow",
     });
-    expect(controller.isEnabled()).toBe(true);
+    expect(classifyAutoModeActionMock).toHaveBeenCalledTimes(2);
     await handlers.get("session_shutdown")?.({}, ctx as never);
   });
 
@@ -208,35 +190,6 @@ describe("Leash classifier failure fallback", () => {
     expect(controller.isEnabled()).toBe(true);
     expect(updateAutoModeConfigMock).not.toHaveBeenCalled();
     expect(ctx.ui.notify).not.toHaveBeenCalled();
-    await handlers.get("session_shutdown")?.({}, ctx as never);
-  });
-
-  it("requires manual approval for a late allow after a sibling classifier fails", async () => {
-    classifyAutoModeActionMock.mockReset();
-    updateAutoModeConfigMock.mockReset();
-    const { controller, ctx, handlers } = autoModeHarness();
-    let resolveLate!: (verdict: AutoModeVerdict) => void;
-    classifyAutoModeActionMock.mockResolvedValueOnce({
-      decision: "ask",
-      source: "fallback",
-      reason: "Provider failed.",
-    });
-    classifyAutoModeActionMock.mockReturnValueOnce(
-      new Promise<AutoModeVerdict>((resolve) => {
-        resolveLate = resolve;
-      }),
-    );
-    const failed = controller.classify(action, ctx as never);
-    const late = controller.classify(action, ctx as never);
-    await failed;
-    resolveLate({
-      decision: "allow",
-      source: "classifier",
-      reason: "Late approval.",
-    });
-    expect(await late).toMatchObject({ decision: "ask", source: "fallback" });
-    expect(updateAutoModeConfigMock).toHaveBeenCalledTimes(1);
-    expect(ctx.ui.notify).toHaveBeenCalledTimes(1);
     await handlers.get("session_shutdown")?.({}, ctx as never);
   });
 
@@ -274,29 +227,6 @@ describe("Leash classifier failure fallback", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("remains manual if saving the fallback setting fails", async () => {
-    classifyAutoModeActionMock.mockReset();
-    updateAutoModeConfigMock.mockReset();
-    updateAutoModeConfigMock.mockImplementationOnce(() => {
-      throw new Error("Read-only config");
-    });
-    const { controller, ctx, handlers } = autoModeHarness();
-    classifyAutoModeActionMock.mockResolvedValueOnce({
-      decision: "ask",
-      source: "fallback",
-      reason: "Provider failed.",
-    });
-    expect(await controller.classify(action, ctx as never)).toMatchObject({
-      decision: "ask",
-    });
-    expect(controller.isEnabled()).toBe(false);
-    expect(ctx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("could not save manual mode"),
-      "warning",
-    );
-    await handlers.get("session_shutdown")?.({}, ctx as never);
   });
 });
 
