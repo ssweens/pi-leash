@@ -46,6 +46,8 @@ export interface AutoModeUserDecision {
 const DEFAULT_ALLOW_RULES = [
   "Routine local operations inside the project are allowed when they do not irreversibly destroy pre-existing state.",
   "Deleting an exact, fresh scratch directory created by the agent in the visible command or earlier visible session command is allowed when the deletion is bounded to that directory.",
+  "Deleting subdirectories, build outputs, or test artifacts inside an isolated /tmp/<workspace> or $TMPDIR/<workspace> directory (or a scratch workspace used by the session) is allowed when bounded to that workspace.",
+  "Read-only local inspection of project or environment files (such as ls, stat, rg, grep, sed -n, head, tail, or cat on .env or config files) without modifying or exfiltrating them is allowed.",
 ];
 
 const DEFAULT_SOFT_DENY_RULES = [
