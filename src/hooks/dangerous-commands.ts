@@ -875,7 +875,6 @@ const SETTERS = new Set([
   "typeset",
   "local",
   "readonly",
-  "export",
   "unset",
   "getopts",
   "mapfile",
@@ -901,8 +900,6 @@ const CONTROL = new Set([
   "esac",
   "select",
   "function",
-  "{",
-  "}",
   "[[",
 ]);
 const OPAQUE =

@@ -419,5 +419,10 @@ describe("shell wrappers, bypasses, literal variables, and heredocs", () => {
         'S=/Volumes/DabbleFiles/tmp/engruv-canary.e3keat; C=/Volumes/DabbleFiles/src/crater; W=/Users/ssweens/Spaces/crater/crater; D=$S/batch-ten-complete.836lo0mr; P=$C/.venv/bin/python; M=$C/data/v9_assets/hf_package; set -o pipefail; (env TMPDIR="$S/tmp" "$P" -B -u "$S/build-v5-batch-vocab.py" && cd "$W" && env TMPDIR="$S/tmp" "$P" -B -X faulthandler -u "$S/query-batch-v5-fusion.py") 2>&1 | tee "$S/query-batch-v5-fusion.log"',
       ),
     ).toEqual([]);
+    expect(
+      descriptions(
+        'SCR=$(cat /tmp/chonk-v9-scratch-path); BASE=/Volumes/DabbleFiles/tmp/engruv-canary.e3keat/batch-ten-complete.836lo0mr; PY=/Volumes/DabbleFiles/src/crater/.venv/bin/python; export PYTHONPATH=/Users/ssweens/Spaces/crater/crater; { echo "scratch=$SCR"; "$PY" bin/build_v9_track_vectors.py --vectors-dir "$BASE/v9_vectors" --out "$SCR/baseline"; "$PY" "$SCR/build_v9_track_vectors_bounded.py" --vectors-dir "$BASE/v9_vectors" --out "$SCR/bounded"; } > "$SCR/build.log" 2>&1',
+      ),
+    ).toEqual([]);
   });
 });
