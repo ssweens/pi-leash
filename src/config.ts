@@ -248,6 +248,7 @@ const DEFAULT_SECRET_FILES_RULE: PolicyRule = {
   description: "Files containing secrets",
   patterns: [
     { pattern: ".env" },
+    { pattern: ".env.*" },
     { pattern: ".env.local" },
     { pattern: ".env.production" },
     { pattern: ".env.prod" },
@@ -261,7 +262,7 @@ const DEFAULT_SECRET_FILES_RULE: PolicyRule = {
     { pattern: ".env.sample" },
     { pattern: ".env.test" },
   ],
-  protection: "noAccess",
+  protection: "readOnly",
   onlyIfExists: true,
   blockMessage:
     "Accessing {file} is not allowed. This file contains secrets. " +

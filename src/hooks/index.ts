@@ -10,6 +10,6 @@ export function setupLeashHooks(pi: ExtensionAPI, config: ResolvedConfig) {
   const runtime: LeashRuntimeState = { enabled: true };
   const autoMode = setupAutoMode(pi, config, runtime);
   setupPathAccessHook(pi, config, runtime); // boundary check — runs first
-  setupPoliciesHook(pi, config, runtime); // policy rules — runs second
+  setupPoliciesHook(pi, config, runtime, autoMode); // policy rules — runs second
   setupPermissionGateHook(pi, config, autoMode, runtime); // dangerous commands — runs third
 }

@@ -1,10 +1,8 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import { parse } from "../vendor/aliou-sh/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PolicyRule, Protection, ResolvedConfig } from "../config";
 import { emitBlocked } from "../utils/events";
-import type { LeashRuntimeState } from "./runtime";
 import { expandGlob, hasGlobChars } from "../utils/glob-expander";
 import {
   type CompiledPattern,
@@ -12,6 +10,9 @@ import {
   normalizeFilePath,
 } from "../utils/matching";
 import { walkCommands, wordToString } from "../utils/shell-utils";
+import { parse } from "../vendor/aliou-sh/index";
+import type { AutoModeController } from "./auto-mode";
+import type { LeashRuntimeState } from "./runtime";
 
 const DEFAULT_BLOCK_MESSAGES: Record<Protection, string> = {
   noAccess:
@@ -267,6 +268,7 @@ export function setupPoliciesHook(
   pi: ExtensionAPI,
   config: ResolvedConfig,
   runtime: LeashRuntimeState = { enabled: true },
+  autoMode?: AutoModeController,
 ) {
   if (!config.features.policies) return;
 
@@ -301,6 +303,27 @@ export function setupPoliciesHook(
 
       const blockedTools = BLOCKED_TOOLS[effective.protection];
       if (!blockedTools.has(toolName)) continue;
+
+      if (
+        effective.protection === "readOnly" &&
+        toolName === "bash" &&
+        autoMode?.isEnabled()
+      ) {
+        const command = String(event.input.command ?? "");
+        const verdict = await autoMode.classify(
+          {
+            toolName,
+            input: event.input as Record<string, unknown>,
+            command,
+            description: `command touches a protected path (${normalizedTarget})`,
+            pattern: `path:${effective.ruleId}`,
+          },
+          ctx,
+        );
+        if (!runtime.enabled) return;
+        autoMode.recordVerdict(verdict, ctx);
+        if (verdict.decision === "allow") continue;
+      }
 
       ctx.ui.notify(
         `Blocked ${toolName} on protected file: ${normalizedTarget} (${effective.ruleId})`,
