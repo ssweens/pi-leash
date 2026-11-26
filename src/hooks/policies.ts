@@ -12,6 +12,7 @@ import {
 import { walkCommands, wordToString } from "../utils/shell-utils";
 import { parse } from "../vendor/aliou-sh/index";
 import type { AutoModeController } from "./auto-mode";
+import { execSegments, stripCommandWords } from "./dangerous-commands";
 import type { LeashRuntimeState } from "./runtime";
 
 const DEFAULT_BLOCK_MESSAGES: Record<Protection, string> = {
@@ -147,21 +148,68 @@ async function expandCandidate(candidate: string): Promise<string[]> {
   return [candidate];
 }
 
+const READ_ONLY_BASH = new Set([
+  "echo",
+  "printf",
+  "ls",
+  "rg",
+  "grep",
+  "egrep",
+  "fgrep",
+  "head",
+  "tail",
+  "wc",
+  "stat",
+  "file",
+  "diff",
+  "md5",
+  "shasum",
+  "sha256sum",
+  "git",
+]);
+
+function isReadOnlyBashCommand(rawWords: string[]): boolean {
+  const w = stripCommandWords(rawWords);
+  const cmd = w[0] ?? "";
+  if (READ_ONLY_BASH.has(cmd)) return true;
+  if (cmd === "sed" || cmd === "awk" || cmd === "gawk") {
+    return !w.some(
+      (x) =>
+        x === "--in-place" ||
+        x.startsWith("--in-place=") ||
+        /^-[A-Za-z]*i/.test(x),
+    );
+  }
+  if (cmd === "find") {
+    return (
+      !w.includes("-delete") &&
+      !execSegments(w).some((seg) =>
+        ["rm", "shred", "mv", "cp", "tee"].includes(seg[0] ?? ""),
+      )
+    );
+  }
+  return false;
+}
+
 async function extractBashFileTargets(
   command: string,
   rules: CompiledRule[],
   cwd: string,
-): Promise<string[]> {
-  const targets = new Set<string>();
+): Promise<{ path: string; isWrite: boolean }[]> {
+  const targets = new Map<string, boolean>();
 
-  const maybeAddTarget = async (candidate: string): Promise<void> => {
-    if (!candidate || candidate.startsWith("-")) return;
+  const maybeAddTarget = async (
+    candidate: string,
+    isWrite: boolean,
+  ): Promise<void> => {
+    if (!candidate || candidate.startsWith("-") || /\.$/.test(candidate))
+      return;
 
     const expanded = await expandCandidate(candidate);
     for (const file of expanded) {
       const normalized = normalizeTargetForPolicy(file, cwd);
       if (matchesAnyPolicyPattern(normalized, rules)) {
-        targets.add(normalized);
+        targets.set(normalized, (targets.get(normalized) ?? false) || isWrite);
       }
     }
   };
@@ -172,14 +220,16 @@ async function extractBashFileTargets(
 
     walkCommands(ast, (cmd) => {
       const words = (cmd.words ?? []).map(wordToString);
+      const argsWrite = !isReadOnlyBashCommand(words);
       for (let i = 1; i < words.length; i++) {
         const arg = words[i] as string;
-        pending.push(maybeAddTarget(arg));
+        pending.push(maybeAddTarget(arg, argsWrite));
       }
 
       for (const redir of cmd.redirects ?? []) {
+        if (redir.op === "<<" || redir.op === "<<-") continue;
         const target = wordToString(redir.target);
-        pending.push(maybeAddTarget(target));
+        pending.push(maybeAddTarget(target, redir.op.includes(">")));
       }
 
       return false;
@@ -187,13 +237,18 @@ async function extractBashFileTargets(
 
     await Promise.all(pending);
 
-    return [...targets];
+    return [...targets.entries()].map(([path, isWrite]) => ({ path, isWrite }));
   } catch {
     const tokenRegex = /"([^"]+)"|'([^']+)'|`([^`]+)`|([^\s"'`<|;&]+)/g;
 
     for (const match of command.matchAll(tokenRegex)) {
       const token = match[1] ?? match[2] ?? match[3] ?? match[4] ?? "";
-      if (!token || token.startsWith("-") || !maybePathLike(token)) {
+      if (
+        !token ||
+        token.startsWith("-") ||
+        /\.$/.test(token) ||
+        !maybePathLike(token)
+      ) {
         continue;
       }
 
@@ -201,12 +256,12 @@ async function extractBashFileTargets(
       for (const file of expanded) {
         const normalized = normalizeTargetForPolicy(file, cwd);
         if (matchesAnyPolicyPattern(normalized, rules)) {
-          targets.add(normalized);
+          targets.set(normalized, true);
         }
       }
     }
 
-    return [...targets];
+    return [...targets.entries()].map(([path, isWrite]) => ({ path, isWrite }));
   }
 }
 
@@ -278,10 +333,14 @@ export function setupPoliciesHook(
     if (!runtime.enabled) return;
 
     const toolName = event.toolName;
-    let targets: string[] = [];
+    let targets: { path: string; isWrite: boolean }[] = [];
 
     if (["read", "write", "edit", "grep", "find", "ls"].includes(toolName)) {
-      targets = extractPathTarget(event.input);
+      const isWrite = toolName === "write" || toolName === "edit";
+      targets = extractPathTarget(event.input).map((path) => ({
+        path,
+        isWrite,
+      }));
     } else if (toolName === "bash") {
       const command = String(event.input.command ?? "");
       targets = await extractBashFileTargets(command, compiledRules, ctx.cwd);
@@ -290,7 +349,7 @@ export function setupPoliciesHook(
       return;
     }
 
-    for (const target of targets) {
+    for (const { path: target, isWrite } of targets) {
       const normalizedTarget = normalizeTargetForPolicy(target, ctx.cwd);
 
       const effective = await getEffectiveProtection(
@@ -303,6 +362,13 @@ export function setupPoliciesHook(
 
       const blockedTools = BLOCKED_TOOLS[effective.protection];
       if (!blockedTools.has(toolName)) continue;
+      if (
+        effective.protection === "readOnly" &&
+        toolName === "bash" &&
+        !isWrite
+      ) {
+        continue;
+      }
 
       if (
         effective.protection === "readOnly" &&
