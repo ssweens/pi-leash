@@ -424,5 +424,53 @@ describe("shell wrappers, bypasses, literal variables, and heredocs", () => {
         'SCR=$(cat /tmp/chonk-v9-scratch-path); BASE=/Volumes/DabbleFiles/tmp/engruv-canary.e3keat/batch-ten-complete.836lo0mr; PY=/Volumes/DabbleFiles/src/crater/.venv/bin/python; export PYTHONPATH=/Users/ssweens/Spaces/crater/crater; { echo "scratch=$SCR"; "$PY" bin/build_v9_track_vectors.py --vectors-dir "$BASE/v9_vectors" --out "$SCR/baseline"; "$PY" "$SCR/build_v9_track_vectors_bounded.py" --vectors-dir "$BASE/v9_vectors" --out "$SCR/bounded"; } > "$SCR/build.log" 2>&1',
       ),
     ).toEqual([]);
+    expect(
+      descriptions(
+        `set -eu; Q=$(cat /Users/ssweens/Spaces/.sessions/thr/queue-release-root.txt); cd "$Q"; P=/Volumes/DabbleFiles/src/engruv/.venv/bin/python; "$P" -B - <<'PY'\nfrom pathlib import Path\np=Path('bin/updatedata/pipeline_progress.py');s=p.read_text().replace('self.dismissed = 0','self.logged_skips: set[str] = set()',1).replace('.clear()','')\nPY`,
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions(
+        `P=/usr/bin/python3; "$P" "foo()" 'a & b' "function x" |& cat`,
+      ),
+    ).toEqual([]);
+    expect(descriptions('export P=/usr/bin/python3; "$P" -V')).toEqual([]);
+    expect(
+      descriptions(
+        '# don\'t break () &\nP=/usr/bin/python3 # inline () &\n"$P" -V',
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions(
+        'Q=$(if [ -f a ]; then echo 1; fi); P=/usr/bin/python3; "$P" -V',
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions("P=/usr/bin/python3; \"$P\" -B - <<'PY'\n$X -rf /\nPY"),
+    ).toEqual([]);
+    expect(descriptions("X=echo; export X=rm; $X -rf /")).toContain(
+      "recursive force delete",
+    );
+    expect(descriptions("S=/bin/sh; \"$S\" -c 'rm -rf /'")).toContain(
+      "recursive force delete",
+    );
+    expect(descriptions("S=eval; \"$S\" 'rm -rf /'")).toContain(
+      "recursive force delete",
+    );
+    for (const c of [
+      "X=echo; IFS=c; $X -rf x",
+      "f() { X=rm; }; X=echo; f; $X -rf x",
+      "f () { X=rm; }; X=echo; f; $X -rf x",
+      "function f { X=rm; }; X=echo; f; $X -rf x",
+      "() { X=rm; }; X=echo; $X -rf x",
+      "X=rm &\n$X -rf x",
+      "X=echo; export X=$Y; $X -rf x",
+      "P=/bin/bash; \"$P\" <<'E'\n$X foo\nE",
+      'P=/usr/bin/python3; "$P" - <<PY\n$($X foo)\nPY',
+    ]) {
+      expect(descriptions(c), c).toContain(
+        "command name comes from a variable",
+      );
+    }
   });
 });

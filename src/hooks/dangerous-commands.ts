@@ -651,6 +651,7 @@ export interface SimpleCommandSpan {
   sub?: boolean;
   data?: boolean;
   code?: boolean;
+  heredocs?: { owner: number; quoted: boolean }[];
 }
 
 const HEREDOC_DATA =
@@ -689,6 +690,14 @@ export function simpleCommands(
   depth = 0,
   text = false,
 ): SimpleCommandSpan[] {
+  return parseCommands(command, depth, text).simples;
+}
+
+function parseCommands(
+  command: string,
+  depth = 0,
+  text = false,
+): { simples: SimpleCommandSpan[]; unsafeTrack: boolean } {
   const out: SimpleCommandSpan[] = [];
   let cur = "";
   let quote: string | undefined;
@@ -696,6 +705,7 @@ export function simpleCommands(
   let op = "";
   let nest = 0;
   let tick = false;
+  let unsafeTrack = false;
   const real: boolean[] = [];
   let lineStart = 0;
   const pending: {
@@ -746,12 +756,17 @@ export function simpleCommands(
         Boolean(owner) &&
         HEREDOC_DATA.test(stripCommandWords(owner?.words ?? [])[0] ?? "") &&
         !piped;
-      for (const x of simpleCommands(bodyText, depth, !h.quoted)) {
+      const ref =
+        !data && !piped && owner
+          ? { owner: h.owner, quoted: h.quoted }
+          : undefined;
+      for (const x of parseCommands(bodyText, depth, !h.quoted).simples) {
         out.push({
           ...x,
           main: false,
           sub: true,
           data: x.data || (data && (h.quoted || x.code === false)),
+          ...(ref ? { heredocs: [...(x.heredocs ?? []), ref] } : {}),
         });
       }
     }
@@ -775,7 +790,13 @@ export function simpleCommands(
       continue;
     }
     if (c === "\\") cur += c + (command[++i] ?? "");
-    else if (c === "$" && command[i + 1] === "'") {
+    else if (
+      c === "#" &&
+      !text &&
+      (i === 0 || /[\s;|&()]/.test(command[i - 1] as string))
+    ) {
+      while (i + 1 < command.length && command[i + 1] !== "\n") i++;
+    } else if (c === "$" && command[i + 1] === "'") {
       quote = "'";
       ansi = true;
       cur += "$'";
@@ -818,6 +839,16 @@ export function simpleCommands(
       if (tick) real.push(true);
       else real.pop();
     } else if (c === "(") {
+      if (
+        !text &&
+        !real.includes(true) &&
+        /^\(\s*\)/.test(command.slice(i)) &&
+        command[i - 1] !== "(" &&
+        command[i + 1] !== "(" &&
+        !/[<>=(]$/.test(cur.trim())
+      ) {
+        unsafeTrack = true;
+      }
       flush(op, true);
       nest++;
       real.push(!text || real[real.length - 1] === true);
@@ -833,15 +864,20 @@ export function simpleCommands(
     } else if (c === ";") flush(";");
     else if (c === "&" || c === "|") {
       const two = command[i + 1] === c;
-      if (two) i++;
+      const pipeBoth = c === "|" && command[i + 1] === "&";
+      if (two || pipeBoth) i++;
       else if (
         c === "&" &&
-        (command[i - 1] === ">" || command[i + 1] === ">")
+        (command[i - 1] === ">" ||
+          command[i - 1] === "<" ||
+          command[i + 1] === ">")
       ) {
         cur += c;
         continue;
+      } else if (c === "&" && !real.includes(true)) {
+        unsafeTrack = true;
       }
-      flush(c === "|" && !two ? "|" : two ? c + c : ";");
+      flush(pipeBoth || (c === "|" && !two) ? "|" : two ? c + c : ";");
     } else cur += c;
   }
   flush("");
@@ -857,11 +893,11 @@ export function simpleCommands(
     }
     for (const s of [...out]) {
       for (const nested of nestedTexts(s.words, stripCommandWords(s.words))) {
-        out.push(...simpleCommands(nested, depth + 1));
+        out.push(...parseCommands(nested, depth + 1).simples);
       }
     }
   }
-  return out;
+  return { simples: out, unsafeTrack };
 }
 
 const LITERAL =
@@ -911,33 +947,35 @@ const mentions = (name: string, text: string) =>
   new RegExp(`(?:^|[\\s;&|()])${name}\\+?=`).test(text);
 
 /**
- * Evaluate all simple commands in `command` (including `eval`, `sh -c`, `env -S`, `find -exec`,
- * literal top-level `$VAR` tracking, `pipe-to-shell`, `dynamic-command`, and `indirect-exec`).
+ * Parse `command` and resolve top-level literal `$VAR` command names (plus any nested `sh -c`/`eval`/`find -exec` or `HEREDOC_DATA` bodies unlocked by them).
  */
-export function collectSimpleCommandMatches(
-  command: string,
-): { description: string }[] {
-  const out: { description: string }[] = [];
-  const simples = simpleCommands(command);
+function resolveSimples(command: string): SimpleCommandSpan[] {
+  const { simples, unsafeTrack } = parseCommands(command);
   const track =
-    !/\bfunction\b|\w\s*\(\s*\)|(?<![&>])&(?![&>])/.test(command) &&
+    !unsafeTrack &&
     !simples.some((x) => {
-      if (!x.main) return false;
+      if (!x.main || x.code) return false;
       const sw = stripCommandWords(x.words);
       return (
         CONTROL.has(x.words[0] ?? "") ||
+        CONTROL.has(sw[0] ?? "") ||
         SETTERS.has(sw[0] ?? "") ||
         (sw[0] === "printf" && sw.includes("-v")) ||
-        /\bIFS\b/.test(x.text)
+        x.words.some((w) => /^IFS\+?=/.test(w))
       );
     });
   const lits = new Map<string, string>();
-  simples.forEach((s0, i) => {
+  const resolved: SimpleCommandSpan[] = [];
+  const extra: SimpleCommandSpan[] = [];
+  for (let i = 0; i < simples.length; i++) {
+    const s0 = simples[i] as SimpleCommandSpan;
     let s = s0;
+    let expandedCommand = false;
     if (track && s0.main) {
+      const assignText = s0.text.replace(/^export\s+/, "");
       const expanded =
-        /^[A-Za-z_][A-Za-z0-9_]*=/.test(s0.text) && !s0.text.includes("'")
-          ? s0.text.replace(
+        /^[A-Za-z_][A-Za-z0-9_]*=/.test(assignText) && !assignText.includes("'")
+          ? assignText.replace(
               /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
               (raw, a, b) => {
                 const val = lits.get((a ?? b) as string);
@@ -947,7 +985,7 @@ export function collectSimpleCommandMatches(
                   : raw;
               },
             )
-          : s0.text;
+          : assignText;
       const m = LITERAL.exec(expanded);
       const set =
         m &&
@@ -970,7 +1008,9 @@ export function collectSimpleCommandMatches(
       if (lit !== undefined && varName !== undefined) {
         const bare =
           !/[\s*?[\]{}~!#^]/.test(lit) ||
-          new RegExp(`(?:^|\\s)"\\$\\{?${varName}\\}?"(?:\\s|$)`).test(s0.text);
+          new RegExp(`(?:^|\\s)"\\$\\{?${varName}\\}?"(?:\\s|$|[<>;&|])`).test(
+            s0.text,
+          );
         const firstStripped = stripCommandWords(s0.words)[0];
         const k = s0.words.findIndex(
           (x, n) =>
@@ -981,12 +1021,52 @@ export function collectSimpleCommandMatches(
         );
         if (bare && k >= 0) {
           s = { ...s0, words: s0.words.map((y, j) => (j === k ? lit : y)) };
+          expandedCommand = true;
         }
       }
       if (set) {
         lits.set(set[1] as string, (set[2] ?? set[3] ?? set[4]) as string);
       }
     }
+    if (
+      !s.data &&
+      s.heredocs?.some(
+        (h) =>
+          (h.quoted || s.code === false) &&
+          HEREDOC_DATA.test(
+            stripCommandWords(resolved[h.owner]?.words ?? [])[0] ?? "",
+          ),
+      )
+    ) {
+      s = { ...s, data: true };
+    }
+    resolved.push(s);
+    if (expandedCommand) {
+      const w = stripCommandWords(s.words);
+      if (w[0] === "find") {
+        for (const seg of execSegments(w)) {
+          if (seg.length)
+            extra.push({ text: seg.join(" "), words: seg, after: "" });
+        }
+      }
+      for (const nested of nestedTexts(s.words, w)) {
+        extra.push(...parseCommands(nested, 1).simples);
+      }
+    }
+  }
+  return [...resolved, ...extra];
+}
+
+/**
+ * Evaluate all simple commands in `command` (including `eval`, `sh -c`, `env -S`, `find -exec`,
+ * literal top-level `$VAR` tracking, `pipe-to-shell`, `dynamic-command`, and `indirect-exec`).
+ */
+export function collectSimpleCommandMatches(
+  command: string,
+): { description: string }[] {
+  const out: { description: string }[] = [];
+  const simples = resolveSimples(command);
+  simples.forEach((s, i) => {
     const w = stripCommandWords(s.words);
     for (const matcher of RAW_BUILTIN_MATCHERS) {
       const description = matcher(w);
