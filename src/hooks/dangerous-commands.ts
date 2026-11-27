@@ -888,7 +888,7 @@ function parseCommands(
         arith: command[i + 1] === "(" || command[i - 1] === "(",
       });
       nest++;
-      real.push(!text || real[real.length - 1] === true);
+      real.push(Boolean(real[real.length - 1]));
     } else if (c === ")" && !inCond()) {
       flush(op, true);
       if (nest) nest--;
@@ -947,6 +947,29 @@ function parseCommands(
 
 const LITERAL =
   /^([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"$`\\!]*)"|([^\s"'$`\\;&|()<>*?[\]{}~!#^]+))$/;
+const UNSAFE_BASENAME =
+  /^(?:rm|sudo|doas|pkexec|su|dd|mkfs.*|shred|diskutil|wipefs|chmod|chown|git|find|curl|wget|eval|exec|source|(?:ba|z|da|k|a|mk)?sh)$/;
+function safePathAssign(assignText: string): [string, string] | undefined {
+  const eq = /^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/.exec(assignText);
+  if (!eq) return undefined;
+  const name = eq[1] as string;
+  let rhs = (eq[2] as string).trim();
+  if (
+    (rhs.startsWith('"') && rhs.endsWith('"')) ||
+    (rhs.startsWith("'") && rhs.endsWith("'"))
+  ) {
+    rhs = rhs.slice(1, -1);
+  } else if (/[\s"'`;&|()<>*?[\]{}~!#^]/.test(rhs)) {
+    return undefined;
+  }
+  const slash = rhs.lastIndexOf("/");
+  if (slash < 0) return undefined;
+  const base = rhs.slice(slash + 1);
+  if (!/^[A-Za-z0-9_.-]+$/.test(base) || UNSAFE_BASENAME.test(base)) {
+    return undefined;
+  }
+  return [name, `/bin/${base}`];
+}
 const SETTERS = new Set([
   "eval",
   "source",
@@ -1069,22 +1092,37 @@ function resolveSimples(command: string): SimpleCommandSpan[] {
           }
         }
       }
-      const assignText = s0.text.replace(/^export\s+/, "");
+      const assignText = s0.text
+        .replace(/^(?:(?:then|do|else|elif)\s+)*export\s+/, "")
+        .replace(/^(?:(?:then|do|else|elif)\s+)+/, "");
       const expanded =
         /^[A-Za-z_][A-Za-z0-9_]*=/.test(assignText) && !assignText.includes("'")
           ? expandVars(assignText)
           : assignText;
       const m = LITERAL.exec(expanded);
-      const set =
-        !seenControl &&
-        m &&
-        !s0.sub &&
-        (s0.after === "" || s0.after === ";") &&
+      const sp = !m ? safePathAssign(expanded) : undefined;
+      const mVal = m ? ((m[2] ?? m[3] ?? m[4]) as string) : undefined;
+      const canSet =
+        (!seenControl && !s0.sub) ||
+        Boolean(
+          sp ||
+            (mVal &&
+              !UNSAFE_BASENAME.test(basename(mVal)) &&
+              mVal.includes("/")),
+        );
+      const set: [string, string] | undefined =
+        canSet &&
+        !s0.code &&
+        s0.after !== "&&" &&
+        s0.after !== "||" &&
+        s0.after !== "|" &&
         simples[i + 1]?.after !== "|"
-          ? m
+          ? m && mVal !== undefined
+            ? [m[1] as string, mVal]
+            : sp
           : undefined;
       for (const name of [...lits.keys()]) {
-        if (!(set && set[1] === name) && mentions(name, s0.text)) {
+        if (!(set && set[0] === name) && mentions(name, s0.text)) {
           lits.delete(name);
         }
       }
@@ -1114,7 +1152,7 @@ function resolveSimples(command: string): SimpleCommandSpan[] {
         }
       }
       if (set) {
-        lits.set(set[1] as string, (set[2] ?? set[3] ?? set[4]) as string);
+        lits.set(set[0], set[1]);
       }
     }
     if (

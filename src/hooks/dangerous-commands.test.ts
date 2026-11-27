@@ -466,6 +466,26 @@ describe("shell wrappers, bypasses, literal variables, and heredocs", () => {
     expect(
       descriptions("S=/tmp/x; (set -C; cat > \"$S/a.py\" <<'PY'\n$X -rf /\nPY\n)"),
     ).toEqual([]);
+    expect(
+      descriptions(
+        'X="$HOME/.npm/_npx/99336612077b7094/node_modules/.bin/xcodebuildmcp"; "$X" ui-automation --help',
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions(
+        'W=$(cat /tmp/root.txt); P="$W/.venv/bin/python"; "$P" -B -m pytest',
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions(
+        '(set -eu; P=/Volumes/DabbleFiles/src/engruv/.venv/bin/python; "$P" -B -m pytest)',
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions(
+        'if [ -x a/python ]; then P=/a/bin/python; else P=/b/bin/python3; fi; "$P" -V',
+      ),
+    ).toEqual([]);
     expect(descriptions("X=echo; export X=rm; $X -rf /")).toContain(
       "recursive force delete",
     );
