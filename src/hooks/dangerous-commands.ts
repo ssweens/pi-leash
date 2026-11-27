@@ -702,6 +702,10 @@ function parseCommands(
   let cur = "";
   let quote: string | undefined;
   let ansi = false;
+  let condDepth = -1;
+  const inCond = () => condDepth >= 0 && nest === condDepth;
+  const quotes: { quote: string | undefined; ansi: boolean; arith?: boolean }[] =
+    [];
   let op = "";
   let nest = 0;
   let tick = false;
@@ -783,7 +787,12 @@ function parseCommands(
         (c === "`" || (c === "$" && command[i + 1] === "("))
       ) {
         flush(op, true);
-        if (c === "$") i++;
+        if (c === "$") {
+          i++;
+          quotes.push({ quote, ansi });
+          quote = undefined;
+          ansi = false;
+        }
         nest++;
         real.push(true);
       }
@@ -806,11 +815,29 @@ function parseCommands(
       ansi = false;
       cur += c;
     } else if (
+      condDepth < 0 &&
+      command.startsWith("[[", i) &&
+      (i === 0 || /[\s;|&(]/.test(command[i - 1] as string)) &&
+      /[\s]/.test(command[i + 2] ?? "")
+    ) {
+      condDepth = nest;
+      cur += "[[";
+      i++;
+    } else if (
+      inCond() &&
+      command.startsWith("]]", i) &&
+      /[\s]/.test(command[i - 1] ?? "") &&
+      (i + 2 === command.length || /[\s;|&)]/.test(command[i + 2] as string))
+    ) {
+      condDepth = -1;
+      cur += "]]";
+      i++;
+    } else if (
       c === "<" &&
       command[i + 1] === "<" &&
       command[i - 1] !== "<" &&
       command[i + 2] !== "<" &&
-      !nest &&
+      !quotes.some((q) => q.arith) &&
       !/^\s*(?:let\b|\(\()/.test(cur)
     ) {
       const m = /^<<(-?)[ \t]*(?:'([^']*)'|"([^"]*)"|([^\s;&|()<>'"]+))/.exec(
@@ -830,6 +857,11 @@ function parseCommands(
     } else if (c === "$" && command[i + 1] === "(") {
       flush(op, true);
       i++;
+      quotes.push({
+        quote: undefined,
+        ansi: false,
+        arith: command[i + 1] === "(",
+      });
       nest++;
       real.push(true);
     } else if (c === "`") {
@@ -838,7 +870,7 @@ function parseCommands(
       nest += tick ? 1 : -1;
       if (tick) real.push(true);
       else real.pop();
-    } else if (c === "(") {
+    } else if (c === "(" && !inCond()) {
       if (
         !text &&
         !real.includes(true) &&
@@ -850,19 +882,32 @@ function parseCommands(
         unsafeTrack = true;
       }
       flush(op, true);
+      quotes.push({
+        quote: undefined,
+        ansi: false,
+        arith: command[i + 1] === "(" || command[i - 1] === "(",
+      });
       nest++;
       real.push(!text || real[real.length - 1] === true);
-    } else if (c === ")") {
+    } else if (c === ")" && !inCond()) {
       flush(op, true);
       if (nest) nest--;
       real.pop();
+      const prev = quotes.pop();
+      if (prev) {
+        quote = prev.quote;
+        ansi = prev.ansi;
+      }
     } else if (c === "\n") {
+      condDepth = -1;
       flush(";");
       if (pending.length) i = bodies(i + 1) - 1;
       pending.length = 0;
       lineStart = out.length;
-    } else if (c === ";") flush(";");
-    else if (c === "&" || c === "|") {
+    } else if (c === ";") {
+      condDepth = -1;
+      flush(";");
+    } else if ((c === "&" || c === "|") && !inCond()) {
       const two = command[i + 1] === c;
       const pipeBoth = c === "|" && command[i + 1] === "&";
       if (two || pipeBoth) i++;
@@ -957,37 +1002,81 @@ function resolveSimples(command: string): SimpleCommandSpan[] {
       if (!x.main || x.code) return false;
       const sw = stripCommandWords(x.words);
       return (
-        CONTROL.has(x.words[0] ?? "") ||
-        CONTROL.has(sw[0] ?? "") ||
+        x.words[0] === "function" ||
+        sw[0] === "function" ||
         SETTERS.has(sw[0] ?? "") ||
         (sw[0] === "printf" && sw.includes("-v")) ||
         x.words.some((w) => /^IFS\+?=/.test(w))
       );
     });
   const lits = new Map<string, string>();
+  const expandVars = (str: string) =>
+    str.replace(
+      /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
+      (raw, a, b) => {
+        const val = lits.get((a ?? b) as string);
+        return val !== undefined && !/[\s"'$`\\;&|()<>*?[\]{}~!#^]/.test(val)
+          ? val
+          : raw;
+      },
+    );
   const resolved: SimpleCommandSpan[] = [];
   const extra: SimpleCommandSpan[] = [];
+  let seenControl = false;
   for (let i = 0; i < simples.length; i++) {
     const s0 = simples[i] as SimpleCommandSpan;
     let s = s0;
     let expandedCommand = false;
     if (track && s0.main) {
+      const sw0 = stripCommandWords(s0.words);
+      if (
+        !s0.code &&
+        (CONTROL.has(s0.words[0] ?? "") || CONTROL.has(sw0[0] ?? ""))
+      ) {
+        seenControl = true;
+        for (const rest of simples.slice(i)) {
+          for (let k = 0; k < rest.words.length; k++) {
+            const kw = rest.words[k];
+            const nextW = rest.words[k + 1];
+            if ((kw === "for" || kw === "select") && nextW) {
+              lits.delete(nextW);
+            }
+          }
+          for (const name of [...lits.keys()]) {
+            if (mentions(name, rest.text)) lits.delete(name);
+          }
+        }
+        if (
+          s0.words[0] === "for" &&
+          s0.words[1] &&
+          s0.words[2] === "in" &&
+          s0.words.length > 3
+        ) {
+          const varName = s0.words[1];
+          const items = s0.words.slice(3).map(expandVars);
+          const base = items[0] ? basename(items[0]) : "";
+          if (
+            base &&
+            items.every(
+              (it) =>
+                Boolean(it) &&
+                !/[\s"'$`\\;&|()<>*?[\]{}~!#^]/.test(it) &&
+                basename(it) === base,
+            ) &&
+            !simples.slice(i + 1).some((rest) => mentions(varName, rest.text))
+          ) {
+            lits.set(varName, items[0] as string);
+          }
+        }
+      }
       const assignText = s0.text.replace(/^export\s+/, "");
       const expanded =
         /^[A-Za-z_][A-Za-z0-9_]*=/.test(assignText) && !assignText.includes("'")
-          ? assignText.replace(
-              /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
-              (raw, a, b) => {
-                const val = lits.get((a ?? b) as string);
-                return val !== undefined &&
-                  !/[\s"'$`\\;&|()<>*?[\]{}~!#^]/.test(val)
-                  ? val
-                  : raw;
-              },
-            )
+          ? expandVars(assignText)
           : assignText;
       const m = LITERAL.exec(expanded);
       const set =
+        !seenControl &&
         m &&
         !s0.sub &&
         (s0.after === "" || s0.after === ";") &&

@@ -448,6 +448,24 @@ describe("shell wrappers, bypasses, literal variables, and heredocs", () => {
     expect(
       descriptions("P=/usr/bin/python3; \"$P\" -B - <<'PY'\n$X -rf /\nPY"),
     ).toEqual([]);
+    expect(
+      descriptions(
+        'set -eu; A=/Users/ssweens/Spaces/.sessions/thr_mfyf295w9eb5; D=$(cat "$A/panel-022-proof-root.txt"); P=/Volumes/DabbleFiles/src/engruv/.venv/bin/python; for N in 80 120; do for TYPE in panel active; do "$P" -B "$A/render-tui-terminal-capture.py"; done; done',
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions(
+        `set -eu; A=/Users/ssweens/Spaces/.sessions/thr_mfyf295w9eb5; cd "$(cat "$A/audio-release-root.txt")"; P=/Volumes/DabbleFiles/src/engruv/.venv/bin/python; "$P" -B - <<'PY'\nfrom pathlib import Path\nprint(Path('a').read_text())\nPY\n"$P" -B -m pytest -q tests/test_pipeline_queue.py`,
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions(
+        '(umask 077; if [[ -z "$f" || "$f" -lt 55 ]]; then echo ok; fi)',
+      ),
+    ).toEqual([]);
+    expect(
+      descriptions("S=/tmp/x; (set -C; cat > \"$S/a.py\" <<'PY'\n$X -rf /\nPY\n)"),
+    ).toEqual([]);
     expect(descriptions("X=echo; export X=rm; $X -rf /")).toContain(
       "recursive force delete",
     );
